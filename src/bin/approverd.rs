@@ -719,24 +719,19 @@ fn with_tabs(html: &str, active: &str) -> String {
     )
 }
 
-/// On iOS, a Home Screen app can be given a viewport that stops a status
-/// bar's height short of the bottom of the screen, and fixed elements are
-/// clipped to it, so the tab bar floats with a blank band under it. Detect that
-/// and mark the page `vp-short`; ui.css then lays it out as a full-screen column
-/// with the tab bar as its last row (seen on an iPhone 15 Pro, iOS 27.3: the
-/// viewport is 793pt of an 852pt screen, but 100lvh is still 852).
+/// In an iOS Home Screen app, mark the page `ios-app` so ui.css lays it out
+/// as a full-screen column (100lvh) with the tab bar as its last row. iOS can
+/// hand the app a viewport a status bar's height short of the screen (793pt of
+/// 852 on an iPhone 15 Pro, iOS 27.3), switching between that and the full
+/// height on zoom and scroll; fixed elements are clipped to it, so a fixed tab
+/// bar floats over a blank band. The column is right at either height. When
+/// the viewport is short the page is a little taller than it, so the page
+/// itself must never scroll (only <main> does), or the tab bar lifts off the
+/// bottom edge.
 const VIEWPORT_FIX: &str = r#"(()=>{
 if(navigator.standalone!==true)return; // iOS Home Screen apps only
-const p=document.createElement("div");
-p.style.cssText="position:fixed;left:0;bottom:0;width:0;height:0;visibility:hidden;pointer-events:none";
-document.body.append(p);
-const fit=()=>{
-  const land=innerWidth>innerHeight;
-  const screenH=land?Math.min(screen.width,screen.height):Math.max(screen.width,screen.height);
-  const gap=Math.round(screenH-p.getBoundingClientRect().bottom);
-  document.documentElement.classList.toggle("vp-short",gap>0&&gap<120);
-};
-fit();addEventListener("resize",fit);addEventListener("orientationchange",()=>setTimeout(fit,300));
+document.documentElement.classList.add("ios-app");
+addEventListener("scroll",()=>{if(scrollY||scrollX)scrollTo(0,0);},{passive:true});
 })();"#;
 
 /// A page or stylesheet: never cached, never framed (so the Approve button

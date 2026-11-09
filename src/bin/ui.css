@@ -142,16 +142,17 @@ ul.facts svg { width: 16px; height: 16px; margin-top: 3px; color: var(--muted); 
   border-top: 1px solid var(--line);
   background: var(--surface);
 }
-/* iOS Home Screen apps can get a viewport a status bar's height short of the
-   screen, and fixed elements are clipped to it. There (html.vp-short, set by the
-   script after the tab bar) the page becomes a full-screen column instead:
-   100lvh still measures the whole screen, the content scrolls inside <main>,
-   and the tab bar is the last row, on the real bottom edge. */
-html.vp-short, html.vp-short body { height: 100lvh; overflow: hidden; }
-html.vp-short body.tabbed { display: flex; flex-direction: column; padding-bottom: 0; }
-html.vp-short .tabbed > .screen { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overscroll-behavior: contain; }
-html.vp-short .tabbed .actions { bottom: 0; }
-html.vp-short .tabs { position: static; flex: none; }
+/* iOS Home Screen apps (html.ios-app, set by the script after the tab bar): a
+   full-screen column instead of fixed bars. iOS can give the app a viewport a
+   status bar's height short of the screen and clips fixed elements to it;
+   100lvh is the whole screen either way. Only <main> scrolls, the tab bar is
+   the last row, and double-tap zoom (which flips the viewport) is off. */
+html.ios-app { touch-action: manipulation; overscroll-behavior: none; }
+html.ios-app, html.ios-app body { height: 100lvh; overflow: hidden; }
+html.ios-app body.tabbed { display: flex; flex-direction: column; padding-bottom: 0; }
+html.ios-app .tabbed > .screen { flex: 1; min-height: 0; width: 100%; overflow-y: auto; overscroll-behavior: contain; }
+html.ios-app .tabbed .actions { bottom: 0; }
+html.ios-app .tabs { position: static; flex: none; }
 .tabs a {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
   color: var(--muted); text-decoration: none; font-size: 10.5px; font-weight: 600;
