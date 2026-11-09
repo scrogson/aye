@@ -65,8 +65,6 @@ struct App {
     origin: String,
     rp_id: String,
     host: String,
-    /// Optional now that Web Push is here: (topic URL, token).
-    ntfy: Option<(String, String)>,
     keys_file: String,
     /// VAPID private key (raw P-256, base64url) and its public half.
     vapid_key: String,
@@ -214,22 +212,12 @@ async fn serve() {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let ntfy = match (std::env::var("NTFY_URL"), std::env::var("NTFY_TOKEN")) {
-        (Ok(u), Ok(t)) if !u.is_empty() => Some((u, t)),
-        _ => None,
-    };
-    eprintln!(
-        "approverd: {origin}, {} passkey(s), {} push device(s), ntfy {}",
-        passkeys.len(),
-        subs.len(),
-        if ntfy.is_some() { "on" } else { "off" }
-    );
+    eprintln!("approverd: {origin}, {} passkey(s), {} device(s) for notifications", passkeys.len(), subs.len());
     let app = Arc::new(App {
         webauthn,
         host: rp_id.split('.').next().unwrap_or(&rp_id).to_string(),
         rp_id,
         origin,
-        ntfy,
         keys_file,
         vapid_key,
         vapid_public,
@@ -333,9 +321,8 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
             };
             let waiting = s.pending.lock().await.len();
             let phones = s.subs.lock().await.len();
-            let ntfy = if s.ntfy.is_some() { "on" } else { "off" };
             ok(format!(
-                "address       {}\npasskeys      {keys}\nregistration  {reg}\nnotifications {phones} device(s) by Web Push, ntfy {ntfy}\nwaiting       {waiting} request(s)",
+                "address       {}\npasskeys      {keys}\nregistration  {reg}\ndevices       {phones} get notifications\nwaiting       {waiting} request(s)",
                 s.origin
             ))
         }
@@ -617,7 +604,7 @@ async fn reg_finish(State(s): S, Json(c): Json<RegisterPublicKeyCredential>) -> 
     StatusCode::OK
 }
 
-// ---------- notifications: Web Push to the home-screen app, and ntfy ----------
+// ---------- notifications: Web Push to the home-screen app ----------
 
 fn kind_label(kind: &str) -> &'static str {
     if kind == "claude" { "Claude Code" } else { "sudo" }
@@ -633,6 +620,9 @@ async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
         "tag": id.to_string(),
     });
     let subs = s.subs.lock().await.clone();
+    if subs.is_empty() {
+        eprintln!("approverd: no device gets notifications; open {}/ on the phone to turn them on", s.origin);
+    }
     for sub in &subs {
         match send_push(&s, sub, &payload).await {
             Ok(()) => {}
@@ -641,21 +631,6 @@ async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
                 drop_sub(&s, &sub.endpoint).await;
             }
             Err((false, e)) => eprintln!("approverd: push to {} failed: {e}", sub.device),
-        }
-    }
-    if let Some((url, token)) = &s.ntfy {
-        let sent = reqwest::Client::new()
-            .post(url)
-            .bearer_auth(token)
-            .header("Title", "Approval needed")
-            .header("Priority", "high")
-            .header("Click", format!("{}/approve/{id}", s.origin))
-            .body(format!("Approval waiting on {}", s.host))
-            .send()
-            .await
-            .and_then(|r| r.error_for_status());
-        if let Err(e) = sent {
-            eprintln!("approverd: ntfy push failed: {e}");
         }
     }
 }

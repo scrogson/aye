@@ -18,8 +18,7 @@ sudo / Claude Code ──► approve ──► approverd (127.0.0.1:7070) ──
 ```
 
 Nothing to install on the phone: the app is the pages approverd serves, added
-to the Home Screen. A self-hosted ntfy still works alongside it (see
-[ntfy](#ntfy)).
+to the Home Screen.
 
 ## What's in here
 
@@ -28,7 +27,7 @@ to the Home Screen. A self-hosted ntfy still works alongside it (see
 | `src/bin/approverd.rs` | The daemon: local API, Web Push, the pages, control socket, and the `approverd` CLI |
 | `src/bin/*.html`, `sw.js` | The Home Screen app: notifications setup, approval and passkey pages, service worker |
 | `src/bin/approve.rs` | The client: a PAM helper for sudo and a Claude Code hook |
-| `deploy/setup.sh` | Installs approverd and `tailscale serve` on this machine (and ntfy, if asked) |
+| `deploy/setup.sh` | Installs approverd and `tailscale serve` on this machine |
 | `deploy/pam.sh` | Adds phone approval to sudo (`test`, `install`, `remove`) |
 | `deploy/claude-hook.sh` | Adds the Claude Code hook to `~/.claude/settings.json` (`install`, `remove`) |
 
@@ -88,23 +87,6 @@ sudo approverd push remove <n>           # stop notifying one (number from the l
 
 A device that deletes the app or turns notifications off is dropped by itself
 the next time a push to it bounces.
-
-## ntfy
-
-The first version pushed through a self-hosted ntfy, and it still can,
-alongside Web Push. `NTFY=1 deploy/setup.sh` installs ntfy from the AUR
-(Arch), creates the accounts, and serves it on port 8443; `PHONE_USER` names
-the account the ntfy app signs in with. approverd uses ntfy whenever
-`/etc/approver/approverd.env` has `NTFY_URL` and `NTFY_TOKEN`.
-
-To stop using it once Web Push works, drop those two lines and restart:
-
-```bash
-sudo sed -i '/^NTFY_/d' /etc/approver/approverd.env
-sudo systemctl restart approverd
-sudo tailscale serve --https=8443 off
-sudo systemctl disable --now ntfy
-```
 
 ## sudo
 
@@ -217,9 +199,5 @@ unanswered request is denied.
   means every device turns notifications on again.
 - Turning on notifications needs a passkey signature, so a visitor on the
   tailnet can't add their own device.
-- With ntfy: iOS needs ntfy.sh to wake the ntfy app (`upstream-base-url`).
-  ntfy.sh sees a hash of the topic URL, never the message. Someone who
-  guesses the topic could send you a fake push, but it can't approve
-  anything.
 - The local API on 127.0.0.1:7070 accepts requests from any local user, so
   any of them can send you a push. Approving still needs your passkey.
