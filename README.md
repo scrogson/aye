@@ -211,9 +211,10 @@ unanswered request is denied.
 
 Each machine runs its own ayed with its own name, passkeys and Home
 Screen app, so a Mac shows up on the phone as a second Aye
-(`https://<mac>.<tailnet>.ts.net`). Needs macOS 14 or later, Tailscale, the
-Xcode command line tools and a Rust toolchain. OpenSSL is built into the
-binaries, so Homebrew isn't needed.
+(`https://<mac>.<tailnet>.ts.net`). Needs macOS 14 or later, Tailscale with
+HTTPS on, `jq` (built in from macOS 15), the Xcode command line tools and a
+Rust toolchain. OpenSSL is built into the binaries, so Homebrew is needed
+only for the optional [YubiKey and tmux](#touch-id-and-a-yubikey) pieces.
 
 ```bash
 cargo build --release
@@ -229,7 +230,8 @@ service itself: `sudo launchctl print system/local.ayed`.
 For sudo, macOS has no `pam_exec`, so `pam/pam_aye.c` does its job: it
 runs `aye` and lets sudo through only on a signed approval.
 `deploy/macos/pam.sh` builds it and puts one line in `/etc/pam.d/sudo_local`
-(which macOS keeps across updates), after Touch ID if that's on:
+(which macOS keeps across updates), after Touch ID and a YubiKey if they're
+on:
 
 ```
 auth  sufficient  pam_tid.so                           ← unchanged, if there
@@ -250,6 +252,66 @@ line through a macOS password dialog, which doesn't depend on sudo.
 
 The Claude Code hook installs the same way (`deploy/claude-hook.sh install`).
 It checks whether the Mac is locked with `ioreg`.
+
+### Touch ID and a YubiKey
+
+sudo tries the lines in `sudo_local` in turn and stops at the first that
+works, so with all of them on it's Touch ID, then a YubiKey, then the phone,
+then your password:
+
+```
+auth  sufficient  pam_tid.so                          ← Touch ID, at the Mac
+auth  sufficient  /opt/homebrew/lib/pam/pam_u2f.so …  ← YubiKey, if it's plugged in
+auth  sufficient  /usr/local/lib/pam/pam_aye.so       ← the phone
+                                                        then /etc/pam.d/sudo: the password
+```
+
+`sudo_local` is read-only, even for root: edit it with `sudo vi` and save
+with `:wq!`. `deploy/macos/pam.sh` puts `pam_aye` after the other two
+whichever order you set them up in.
+
+Touch ID for sudo is off until you turn it on: macOS ships its line
+commented out. If there's no `sudo_local` yet, copy
+`/etc/pam.d/sudo_local.template` there first. Then:
+
+```bash
+sudo sed -i '' 's/^#\(auth.*pam_tid\.so\)/\1/' /etc/pam.d/sudo_local
+```
+
+Touch ID doesn't work inside tmux unless `pam_reattach` comes before it
+(`brew install pam-reattach`):
+
+```
+auth  optional    /opt/homebrew/lib/pam/pam_reattach.so
+auth  sufficient  pam_tid.so
+```
+
+With the lid closed there's no Touch ID, so a YubiKey can take its place.
+That needs Yubico's `pam-u2f` (`brew install pam-u2f`). Register the key,
+touching it when it blinks, and keep the list root-owned so nothing running
+as you can add a key to it:
+
+```bash
+pamu2fcfg -o pam://<mac> -i pam://<mac> > ~/u2f_mappings
+pamu2fcfg -n -o pam://<mac> -i pam://<mac> >> ~/u2f_mappings  # a second key, optional
+sudo install -m644 -o root -g wheel ~/u2f_mappings /etc/u2f_mappings && rm ~/u2f_mappings
+```
+
+Then add this line above `pam_aye`:
+
+```
+auth  sufficient  /opt/homebrew/lib/pam/pam_u2f.so authfile=/etc/u2f_mappings origin=pam://<mac> appid=pam://<mac> cue
+```
+
+`<mac>` can be any fixed name, such as `scutil --get LocalHostName`.
+pam-u2f's default is the hostname, which on a Mac can change with the
+network, and the key would stop working. sudo then says "Please touch the
+device." and waits until the key times out by itself before asking the
+phone; with no registered key plugged in it goes straight to the phone.
+
+`pam_u2f.so` and the libraries it loads live in Homebrew's prefix, which
+your user can write to, so malware running as you could swap them and get
+root the next time you use sudo.
 
 ## Security notes
 

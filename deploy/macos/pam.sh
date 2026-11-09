@@ -2,7 +2,7 @@
 # Adds phone approval to sudo on this Mac, the macOS version of deploy/pam.sh.
 # macOS has no pam_exec, so pam/pam_aye.c (built here) runs aye in
 # its place. The line goes in /etc/pam.d/sudo_local, the file macOS keeps for
-# local additions across updates, after Touch ID if that's on:
+# local additions across updates, after Touch ID and a YubiKey if they're on:
 #
 #   auth  sufficient  pam_tid.so                           (unchanged, if there)
 #   auth  sufficient  /usr/local/lib/pam/pam_aye.so   (added)
@@ -30,13 +30,13 @@ BACKUP=/etc/pam.d/sudo_local.aye-backup
 [[ $EUID -ne 0 ]] || { echo "run as your user, not root"; exit 1; }
 
 # sudo_local as it is now (or the template macOS ships, if there's none yet),
-# with our line after the last pam_tid/pam_reattach line, else at the end.
+# with our line after the last pam_tid/pam_reattach/pam_u2f line, else at the end.
 with_line() {
   local src=$LOCAL
   [[ -f $src ]] || src=/etc/pam.d/sudo_local.template
   [[ -f $src ]] || src=/dev/null
   awk -v line="$LINE" '
-    { lines[NR] = $0 } /^auth.*(pam_tid|pam_reattach)/ { after = NR }
+    { lines[NR] = $0 } /^auth.*(pam_tid|pam_reattach|pam_u2f)/ { after = NR }
     END {
       if (!after) after = NR
       for (i = 1; i <= NR; i++) { print lines[i]; if (i == after) print line }
