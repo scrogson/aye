@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Approver">
+<title>Approver</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="/ui.css">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-faceid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1M9 16.2c1.8 1.4 4.2 1.4 6 0"/></g></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z"/><path d="M12 10v4M12 17v.01"/></g></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></g></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M12 3l7 3v5.5c0 4.3-3 8-7 9.5-4-1.5-7-5.2-7-9.5V6z"/></symbol>
+  <symbol id="i-share" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M8 7l4-4 4 4"/><path d="M7 11H5.5v9.5h13V11H17"/></g></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="M12 8.5v7M8.5 12h7"/></g></symbol>
+</svg>
+<main class="screen" id="app">
+  <div class="body"><div class="result"><div class="waiting"><span class="spin"></span>Loading…</div></div></div>
+</main>
+<script>
+const app = document.getElementById("app");
+const SVG = "http://www.w3.org/2000/svg";
+let info = null;      // { key, host, passkeys }
+let reg = null;       // ServiceWorkerRegistration
+let sub = null;       // PushSubscription waiting for the Face ID step
+let login = null;     // { id, options } passkey challenge, fetched ahead of the tap
+let busy = false;
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el[k] = v;
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : String(kid));
+  }
+  return el;
+}
+function icon(id) {
+  const s = document.createElementNS(SVG, "svg");
+  const u = document.createElementNS(SVG, "use");
+  u.setAttribute("href", "#" + id);
+  s.append(u);
+  return s;
+}
+function render(body, actions) {
+  app.replaceChildren(h("div", { class: "body" }, body), actions || []);
+}
+function result(tone, ic, title, ...text) {
+  return h("div", { class: "result" },
+    h("div", { class: `badge ${tone}` }, icon(ic)),
+    h("h1", null, title),
+    ...text.map(t => typeof t === "string" ? h("p", null, t) : t));
+}
+function spinner(text) {
+  return h("div", { class: "actions one" }, h("div", { class: "waiting" }, h("span", { class: "spin" }), text));
+}
+function button(text, ic, onclick, kind = "primary") {
+  return h("button", { class: `btn ${kind}`, type: "button", onclick }, ic && icon(ic), text);
+}
+const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent);
+const standalone = navigator.standalone === true || matchMedia("(display-mode: standalone)").matches;
+
+function b64ToBytes(s) {
+  const bin = atob(s.replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(bin, c => c.charCodeAt(0));
+}
+function sameKey(subscription) {
+  const k = subscription.options && subscription.options.applicationServerKey;
+  if (!k) return true;
+  const a = new Uint8Array(k), b = b64ToBytes(info.key);
+  return a.length === b.length && a.every((x, i) => x === b[i]);
+}
+
+// ---------- screens ----------
+
+function showInstall() {
+  render([
+    h("span", { class: "chip" }, h("span", { class: "dot" }), "One-time setup"),
+    h("h1", null, "Add Approver to your Home Screen"),
+    h("p", { class: "lede" }, "iPhone only sends notifications to web apps on the Home Screen. Then approval requests arrive like any other app's."),
+    h("ul", { class: "facts" },
+      h("li", null, icon("i-share"), h("span", null, "Tap the Share button in Safari's toolbar.")),
+      h("li", null, icon("i-plus"), h("span", null, "Choose Add to Home Screen, then Add.")),
+      h("li", null, icon("i-bell"), h("span", null, "Open Approver from the Home Screen and turn on notifications."))),
+  ]);
+}
+
+function showUnsupported() {
+  render(result("bad", "i-alert", "This browser can't get notifications",
+    "Open this page in Safari on an iPhone with iOS 16.4 or later, or in a current desktop browser."));
+}
+
+function showNoPasskey() {
+  render(result("idle", "i-key", `Add a passkey to ${info.host} first`,
+    "Turning on notifications is confirmed with your passkey, so this device needs one.",
+    h("div", { class: "cmd small" }, "sudo approverd register open")),
+    h("div", { class: "actions one" }, button("Add a passkey", "i-key", () => location.href = "/register")));
+}
+
+function showBlocked() {
+  render(result("bad", "i-alert", "Notifications are turned off",
+    isIOS ? "Turn them on in Settings › Notifications › Approver, then come back here."
+          : "Allow notifications for this site in the browser's settings, then reload."),
+    h("div", { class: "actions one" }, button("Check again", null, () => location.reload())));
+}
+
+function showOff(error) {
+  render([
+    h("span", { class: "chip" }, h("span", { class: "dot" }), "Notifications off"),
+    h("h1", null, `Get ${info.host}'s approval requests here`),
+    h("p", { class: "lede" }, `When sudo or Claude Code on ${info.host} needs you, this device gets a notification. Tap it to approve with Face ID.`),
+    h("ul", { class: "facts" },
+      h("li", null, icon("i-bell"), h("span", null, "A notification says only what kind of request it is. The command shows after you open it.")),
+      h("li", null, icon("i-faceid"), h("span", null, "Turning this on asks for Face ID, so only your passkey can add a device.")),
+      h("li", null, icon("i-shield"), h("span", null, "Requests and answers stay on your tailnet. Apple only carries the encrypted nudge."))),
+    error && h("p", { class: "error" }, error),
+  ], h("div", { class: "actions one" }, button("Turn on notifications", "i-bell", turnOn)));
+}
+
+function showConfirm(error) {
+  const ok = button("Confirm with Face ID", "i-faceid", confirm_);
+  ok.disabled = !login;
+  render([
+    h("span", { class: "chip" }, h("span", { class: "dot" }), "Almost there"),
+    h("h1", null, "Confirm it's you"),
+    h("p", { class: "lede" }, `Sign with your passkey for ${info.host} to start getting its requests on this device.`),
+    error && h("p", { class: "error" }, error),
+  ], h("div", { class: "actions one" }, ok));
+}
+
+function showOn(note) {
+  render([
+    result("ok", "i-check", "Notifications are on",
+      `Approval requests from ${info.host} come to this device. Tap one to approve or deny with Face ID.`,
+      note && h("p", { class: note.bad ? "error" : "stamp" }, note.text)),
+  ], h("div", { class: "actions" },
+    button("Passkeys", null, () => location.href = "/register", "secondary"),
+    button("Send a test", "i-bell", sendTest)));
+}
+
+// ---------- actions ----------
+
+async function loadLogin() {
+  login = null;
+  try {
+    const r = await fetch("/push/challenge", { method: "POST" });
+    if (!r.ok) return false;
+    const d = await r.json();
+    login = { id: d.id, options: PublicKeyCredential.parseRequestOptionsFromJSON(d.options.publicKey) };
+    return true;
+  } catch { return false; }
+}
+
+// Tap 1: permission and a push subscription. iOS only asks inside a tap.
+async function turnOn() {
+  if (busy) return;
+  busy = true;
+  app.querySelector(".actions").replaceWith(spinner("Asking for permission…"));
+  try {
+    const p = await Notification.requestPermission();
+    if (p === "denied") { busy = false; return showBlocked(); }
+    if (p !== "granted") { busy = false; return showOff("Notifications weren't allowed. Try again."); }
+    let s = await reg.pushManager.getSubscription();
+    if (s && !sameKey(s)) { await s.unsubscribe(); s = null; }
+    sub = s || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(info.key) });
+  } catch (e) {
+    busy = false;
+    return showOff(`Couldn't turn on notifications (${e && e.name || "error"}). Try again.`);
+  }
+  busy = false;
+  showConfirm();
+  if (!(await loadLogin())) showConfirm(`Couldn't reach ${info.host}. Check Tailscale, then try again.`);
+  else showConfirm();
+}
+
+// Tap 2: Face ID, then hand the subscription to approverd.
+async function confirm_() {
+  if (busy || !login) return;
+  busy = true;
+  app.querySelector(".actions").replaceWith(spinner("Confirm with Face ID…"));
+  let cred;
+  try {
+    cred = await navigator.credentials.get({ publicKey: login.options });
+  } catch {
+    busy = false;
+    return showConfirm(`Face ID was cancelled or found no passkey for ${info.host}. Try again.`);
+  }
+  let r;
+  try {
+    r = await fetch("/push/subscribe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: login.id, credential: cred.toJSON(), subscription: sub.toJSON() }),
+    });
+  } catch { r = { ok: false, status: 0 }; }
+  busy = false;
+  if (r.ok) return showOn();
+  // The challenge is spent either way: get a fresh one for another try.
+  const why = r.status === 401 ? `That passkey isn't registered on ${info.host}.`
+    : r.status === 0 ? `Couldn't reach ${info.host}. Check Tailscale.`
+    : "It didn't go through.";
+  showConfirm(why + " Try again.");
+  if (await loadLogin()) showConfirm(why + " Try again.");
+}
+
+async function sendTest() {
+  if (busy) return;
+  busy = true;
+  const s = await reg.pushManager.getSubscription();
+  let r;
+  try {
+    r = await fetch("/push/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: s && s.endpoint }) });
+  } catch { r = { ok: false, status: 0 }; }
+  busy = false;
+  if (r.ok) return showOn({ text: "Sent. It should arrive in a few seconds." });
+  if (r.status === 404 || r.status === 410) return showOff("This device was removed. Turn notifications on again.");
+  showOn({ bad: true, text: `The test didn't send (${r.status || "no connection"}). Check: sudo approverd status` });
+}
+
+// ---------- start ----------
+
+(async () => {
+  if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+    return isIOS && !standalone ? showInstall() : showUnsupported();
+  }
+  if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON) return showUnsupported();
+  try {
+    [info, reg] = await Promise.all([
+      fetch("/push/key").then(r => r.json()),
+      navigator.serviceWorker.register("/sw.js", { scope: "/" }).then(() => navigator.serviceWorker.ready),
+    ]);
+  } catch {
+    return render(result("bad", "i-alert", "Couldn't reach this machine",
+      "Check that Tailscale is connected on this device, then reload."),
+      h("div", { class: "actions one" }, button("Reload", null, () => location.reload())));
+  }
+  if (Notification.permission === "denied") return showBlocked();
+  const s = await reg.pushManager.getSubscription();
+  if (s && sameKey(s) && Notification.permission === "granted") {
+    const known = await fetch("/push/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: s.endpoint }) })
+      .then(r => r.json()).then(d => d.known).catch(() => false);
+    if (known) return showOn();
+  }
+  if (!info.passkeys) return showNoPasskey();
+  showOff();
+})();
+</script>
+</body>
+</html>

@@ -1,16 +1,17 @@
 [Unit]
 Description=Passkey-signed remote approvals
-Wants=network-online.target ntfy.service
+Wants=network-online.target
+# ntfy is optional; if it's installed, start after it.
 After=network-online.target ntfy.service
 
 [Service]
 ExecStart=/usr/local/bin/approverd
-# APPROVER_HOST, NTFY_URL, NTFY_TOKEN (root-only file)
+# APPROVER_HOST, and NTFY_URL + NTFY_TOKEN if ntfy is used (root-only file)
 EnvironmentFile=/etc/approver/approverd.env
 Restart=on-failure
 
-# Its own throwaway user; passkeys.json lives in /var/lib/private/approver,
-# readable only by that user.
+# Its own throwaway user; passkeys.json, push.json and vapid.key live in
+# /var/lib/private/approver, readable only by that user.
 DynamicUser=yes
 StateDirectory=approver
 StateDirectoryMode=0700

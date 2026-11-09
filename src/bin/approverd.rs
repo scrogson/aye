@@ -5,7 +5,8 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use serde::Deserialize;
+use ct_codecs::{Base64UrlSafeNoPadding, Encoder};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::HashMap, os::unix::fs::{MetadataExt, PermissionsExt}, sync::Arc, time::Duration};
 use tokio::{
@@ -14,6 +15,7 @@ use tokio::{
     sync::{oneshot, Mutex},
     time::Instant,
 };
+use web_push::{ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushMessageBuilder};
 use webauthn_rs::prelude::*;
 
 /// How long a request waits for an answer before it counts as a deny.
@@ -30,6 +32,9 @@ usage:
   approverd register close
   approverd passkeys                 list registered passkeys
   approverd passkeys remove <id>     remove one (an id prefix is enough)
+  approverd push                     list devices that get notifications
+  approverd push test                send a test notification to each
+  approverd push remove <n>          stop notifying one (number from the list)
 
 The commands talk to the running daemon over its control socket, which only
 root can open: run them with sudo.";
@@ -43,14 +48,33 @@ struct Pending {
     done: Option<oneshot::Sender<bool>>,
 }
 
+/// A device that turned on notifications from the home page.
+#[derive(Clone, Serialize, Deserialize)]
+struct PushSub {
+    endpoint: String,
+    p256dh: String,
+    auth: String,
+    /// "iPhone", "Mac", ... from its user agent, for `approverd push`.
+    device: String,
+    /// Unix seconds.
+    added: u64,
+}
+
 struct App {
     webauthn: Webauthn,
     origin: String,
     rp_id: String,
     host: String,
-    ntfy_url: String,
-    ntfy_token: String,
+    /// Optional now that Web Push is here: (topic URL, token).
+    ntfy: Option<(String, String)>,
     keys_file: String,
+    /// VAPID private key (raw P-256, base64url) and its public half.
+    vapid_key: String,
+    vapid_public: String,
+    subs_file: String,
+    subs: Mutex<Vec<PushSub>>,
+    /// Passkey challenges for turning on notifications, by id.
+    push_logins: Mutex<HashMap<Uuid, (PasskeyAuthentication, Instant)>>,
     passkeys: Mutex<Vec<Passkey>>,
     reg: Mutex<Option<PasskeyRegistration>>,
     pending: Mutex<HashMap<Uuid, Pending>>,
@@ -93,6 +117,12 @@ async fn main() {
         ["register", "close"] => json!({ "cmd": "register_close" }),
         ["passkeys"] | ["passkeys", "list"] => json!({ "cmd": "passkeys" }),
         ["passkeys", "remove", id] => json!({ "cmd": "passkeys_remove", "id": id }),
+        ["push"] | ["push", "list"] => json!({ "cmd": "push" }),
+        ["push", "test"] => json!({ "cmd": "push_test" }),
+        ["push", "remove", n] => match n.parse::<u64>() {
+            Ok(n) => json!({ "cmd": "push_remove", "n": n }),
+            Err(_) => exit_usage("give the device's number from: approverd push"),
+        },
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
             return;
@@ -178,15 +208,34 @@ async fn serve() {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    eprintln!("approverd: {origin}, {} passkey(s)", passkeys.len());
+    let (vapid_key, vapid_public) = vapid_keys(&format!("{state_dir}/vapid.key"));
+    let subs_file = format!("{state_dir}/push.json");
+    let subs: Vec<PushSub> = std::fs::read_to_string(&subs_file)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
+    let ntfy = match (std::env::var("NTFY_URL"), std::env::var("NTFY_TOKEN")) {
+        (Ok(u), Ok(t)) if !u.is_empty() => Some((u, t)),
+        _ => None,
+    };
+    eprintln!(
+        "approverd: {origin}, {} passkey(s), {} push device(s), ntfy {}",
+        passkeys.len(),
+        subs.len(),
+        if ntfy.is_some() { "on" } else { "off" }
+    );
     let app = Arc::new(App {
         webauthn,
         host: rp_id.split('.').next().unwrap_or(&rp_id).to_string(),
         rp_id,
         origin,
-        ntfy_url: env("NTFY_URL"),
-        ntfy_token: env("NTFY_TOKEN"),
+        ntfy,
         keys_file,
+        vapid_key,
+        vapid_public,
+        subs_file,
+        subs: Mutex::new(subs),
+        push_logins: Mutex::new(HashMap::new()),
         passkeys: Mutex::new(passkeys),
         reg: Mutex::new(None),
         pending: Mutex::new(HashMap::new()),
@@ -199,6 +248,17 @@ async fn serve() {
         .route("/local/ask", post(ask))
         .with_state(app.clone());
     let public = Router::new()
+        .route("/", get(|| async { page("text/html; charset=utf-8", include_str!("home.html")) }))
+        .route("/sw.js", get(|| async { page("text/javascript; charset=utf-8", include_str!("sw.js")) }))
+        .route("/manifest.webmanifest", get(manifest))
+        .route("/icon-180.png", get(|| async { page("image/png", &include_bytes!("icon-180.png")[..]) }))
+        .route("/icon-192.png", get(|| async { page("image/png", &include_bytes!("icon-192.png")[..]) }))
+        .route("/icon-512.png", get(|| async { page("image/png", &include_bytes!("icon-512.png")[..]) }))
+        .route("/push/key", get(push_key))
+        .route("/push/check", post(push_check))
+        .route("/push/challenge", post(push_challenge))
+        .route("/push/subscribe", post(push_subscribe))
+        .route("/push/test", post(push_test_one))
         .route("/ui.css", get(|| async { page("text/css; charset=utf-8", include_str!("ui.css")) }))
         .route("/approve/{id}", get(|| async { page("text/html; charset=utf-8", include_str!("approve.html")) }))
         .route("/approve/{id}/challenge", post(challenge))
@@ -270,10 +330,54 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                 _ => "closed".into(),
             };
             let waiting = s.pending.lock().await.len();
+            let phones = s.subs.lock().await.len();
+            let ntfy = if s.ntfy.is_some() { "on" } else { "off" };
             ok(format!(
-                "address       {}\npasskeys      {keys}\nregistration  {reg}\nwaiting       {waiting} request(s)",
+                "address       {}\npasskeys      {keys}\nregistration  {reg}\nnotifications {phones} device(s) by Web Push, ntfy {ntfy}\nwaiting       {waiting} request(s)",
                 s.origin
             ))
+        }
+        "push" => {
+            let subs = s.subs.lock().await;
+            if subs.is_empty() {
+                return ok(format!("No devices get notifications. Open {}/ on the phone to turn them on.", s.origin));
+            }
+            let lines: Vec<String> = subs
+                .iter()
+                .enumerate()
+                .map(|(i, p)| format!("{:>2}  {:<8} added {}  via {}", i + 1, p.device, ago(p.added), endpoint_host(&p.endpoint)))
+                .collect();
+            ok(lines.join("\n"))
+        }
+        "push_test" => {
+            let subs = s.subs.lock().await.clone();
+            if subs.is_empty() {
+                return fail("no devices to notify".into());
+            }
+            let payload = json!({ "title": "Test from approverd", "body": format!("Notifications from {} work.", s.host), "url": "/" });
+            let mut lines = Vec::new();
+            for (i, sub) in subs.iter().enumerate() {
+                let r = send_push(s, sub, &payload).await;
+                if let Err((true, _)) = &r {
+                    drop_sub(s, &sub.endpoint).await;
+                }
+                lines.push(match r {
+                    Ok(()) => format!("{:>2}  {:<8} sent", i + 1, sub.device),
+                    Err((true, e)) => format!("{:>2}  {:<8} gone, removed ({e})", i + 1, sub.device),
+                    Err((false, e)) => format!("{:>2}  {:<8} failed: {e}", i + 1, sub.device),
+                });
+            }
+            ok(lines.join("\n"))
+        }
+        "push_remove" => {
+            let n = cmd["n"].as_u64().unwrap_or(0) as usize;
+            let mut subs = s.subs.lock().await;
+            if n == 0 || n > subs.len() {
+                return fail(format!("no device {n}; see: approverd push"));
+            }
+            let gone = subs.remove(n - 1);
+            save_subs(s, &subs);
+            ok(format!("Stopped notifying {} ({}). {} device(s) left.", gone.device, ago(gone.added), subs.len()))
         }
         "register_open" => {
             let secs = cmd["seconds"].as_u64().unwrap_or(REGISTER_FOR.as_secs()).clamp(1, 24 * 3600);
@@ -323,7 +427,7 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
 
 /// A page or stylesheet: never cached, never framed (so the Approve button
 /// can't be overlaid by another site), and only able to talk to this origin.
-fn page(content_type: &'static str, body: &'static str) -> impl IntoResponse {
+fn page<B: IntoResponse>(content_type: &'static str, body: B) -> impl IntoResponse {
     (
         [
             (header::CONTENT_TYPE, content_type),
@@ -386,6 +490,7 @@ async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
         _ => return None,
     };
     let kind = r.kind.unwrap_or_else(|| "sudo".into());
+    let what = kind_label(&kind);
 
     let id = Uuid::new_v4();
     let (tx, rx) = oneshot::channel();
@@ -396,20 +501,7 @@ async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
     // shows it as expired instead of offering to approve nothing.
     let mut guard = Withdraw { s: s.clone(), id, live: true };
 
-    // The push carries only a link, never the decision or the command.
-    let sent = reqwest::Client::new()
-        .post(&s.ntfy_url)
-        .bearer_auth(&s.ntfy_token)
-        .header("Title", "Approval needed")
-        .header("Priority", "high")
-        .header("Click", format!("{}/approve/{id}", s.origin))
-        .body(format!("Approval waiting on {}", s.host))
-        .send()
-        .await
-        .and_then(|r| r.error_for_status());
-    if let Err(e) = sent {
-        eprintln!("approverd: ntfy push failed: {e}");
-    }
+    tokio::spawn(notify(s.clone(), id, what));
 
     let answer = tokio::time::timeout_at(deadline, rx).await.ok().and_then(Result::ok);
     guard.live = false;
@@ -519,4 +611,321 @@ async fn reg_finish(State(s): S, Json(c): Json<RegisterPublicKeyCredential>) -> 
     save_passkeys(&s, &keys).await;
     eprintln!("approverd: registered passkey #{}", keys.len());
     StatusCode::OK
+}
+
+// ---------- notifications: Web Push to the home-screen app, and ntfy ----------
+
+fn kind_label(kind: &str) -> &'static str {
+    if kind == "claude" { "Claude Code" } else { "sudo" }
+}
+
+/// Every push carries only a link and what kind of request it is, never the
+/// command or the decision: the page loads those over the tailnet.
+async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
+    let payload = json!({
+        "title": "Approval needed",
+        "body": format!("{what} on {}", s.host),
+        "url": format!("/approve/{id}"),
+        "tag": id.to_string(),
+    });
+    let subs = s.subs.lock().await.clone();
+    for sub in &subs {
+        match send_push(&s, sub, &payload).await {
+            Ok(()) => {}
+            Err((true, e)) => {
+                eprintln!("approverd: {} stopped accepting pushes ({e}); removed", sub.device);
+                drop_sub(&s, &sub.endpoint).await;
+            }
+            Err((false, e)) => eprintln!("approverd: push to {} failed: {e}", sub.device),
+        }
+    }
+    if let Some((url, token)) = &s.ntfy {
+        let sent = reqwest::Client::new()
+            .post(url)
+            .bearer_auth(token)
+            .header("Title", "Approval needed")
+            .header("Priority", "high")
+            .header("Click", format!("{}/approve/{id}", s.origin))
+            .body(format!("Approval waiting on {}", s.host))
+            .send()
+            .await
+            .and_then(|r| r.error_for_status());
+        if let Err(e) = sent {
+            eprintln!("approverd: ntfy push failed: {e}");
+        }
+    }
+}
+
+/// Encrypt (RFC 8291) and sign (VAPID, RFC 8292) one push and hand it to the
+/// device's push service. Err((true, _)) means the subscription is gone.
+async fn send_push(s: &App, sub: &PushSub, payload: &Value) -> Result<(), (bool, String)> {
+    let request = build_push(&s.vapid_key, &s.origin, sub, payload).map_err(|e| (false, e))?;
+    let (parts, body) = request;
+    let mut req = reqwest::Client::new().post(&sub.endpoint).body(body);
+    for (k, v) in parts {
+        req = req.header(k, v);
+    }
+    let r = req.timeout(Duration::from_secs(15)).send().await.map_err(|e| (false, e.to_string()))?;
+    match r.status().as_u16() {
+        200..=299 => Ok(()),
+        404 | 410 => Err((true, format!("HTTP {}", r.status()))),
+        code => {
+            let text = r.text().await.unwrap_or_default();
+            Err((false, format!("HTTP {code} {}", text.chars().take(200).collect::<String>())))
+        }
+    }
+}
+
+/// Headers and the encrypted body, ready to POST to the push service.
+type PushRequest = (Vec<(String, String)>, Vec<u8>);
+
+fn build_push(vapid_key: &str, origin: &str, sub: &PushSub, payload: &Value) -> Result<PushRequest, String> {
+    let info = SubscriptionInfo::new(sub.endpoint.as_str(), sub.p256dh.as_str(), sub.auth.as_str());
+    let mut sig = VapidSignatureBuilder::from_base64(vapid_key, &info).map_err(|e| e.to_string())?;
+    // Apple wants a contact; this machine's address is enough and isn't personal.
+    sig.add_claim("sub", origin);
+    let sig = sig.build().map_err(|e| e.to_string())?;
+    let body = payload.to_string();
+    let mut b = WebPushMessageBuilder::new(&info);
+    b.set_payload(ContentEncoding::Aes128Gcm, body.as_bytes());
+    b.set_ttl(TIMEOUT.as_secs() as u32); // no use arriving after the request expired
+    b.set_urgency(Urgency::High);
+    b.set_vapid_signature(sig);
+    let message = b.build().map_err(|e| e.to_string())?;
+    let request = web_push::request_builder::build_request::<Vec<u8>>(message);
+    let headers = request
+        .headers()
+        .iter()
+        .filter(|(k, _)| k.as_str() != "content-length")
+        .filter_map(|(k, v)| Some((k.as_str().to_string(), v.to_str().ok()?.to_string())))
+        .collect();
+    Ok((headers, request.into_body()))
+}
+
+/// Load the VAPID key, or make one on first start.
+fn vapid_keys(path: &str) -> (String, String) {
+    let key = match std::fs::read_to_string(path) {
+        Ok(k) => k.trim().to_string(),
+        Err(_) => {
+            let raw = jwt_simple::prelude::ES256KeyPair::generate().to_bytes();
+            let k = Base64UrlSafeNoPadding::encode_to_string(raw).unwrap();
+            std::fs::write(path, &k).unwrap_or_else(|e| panic!("write {path}: {e}"));
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            k
+        }
+    };
+    let public = VapidSignatureBuilder::from_base64_no_sub(&key)
+        .unwrap_or_else(|_| panic!("{path} isn't a VAPID key; delete it to make a new one (devices then turn notifications on again)"))
+        .get_public_key();
+    (key, Base64UrlSafeNoPadding::encode_to_string(public).unwrap())
+}
+
+fn save_subs(s: &App, subs: &[PushSub]) {
+    let tmp = format!("{}.tmp", s.subs_file);
+    if std::fs::write(&tmp, serde_json::to_string(subs).unwrap()).is_ok() {
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::rename(&tmp, &s.subs_file);
+    }
+}
+
+async fn drop_sub(s: &App, endpoint: &str) {
+    let mut subs = s.subs.lock().await;
+    subs.retain(|p| p.endpoint != endpoint);
+    save_subs(s, &subs);
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+fn ago(t: u64) -> String {
+    match now_secs().saturating_sub(t) {
+        s if s < 3600 => "just now".into(),
+        s if s < 2 * 86400 => format!("{}h ago", s / 3600),
+        s => format!("{}d ago", s / 86400),
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> String {
+    Url::parse(endpoint).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "?".into())
+}
+
+fn device_name(ua: &str) -> String {
+    let name = ["iPhone", "iPad", "Android", "Macintosh", "Windows", "Linux"]
+        .into_iter()
+        .find(|d| ua.contains(d))
+        .unwrap_or("browser");
+    if name == "Macintosh" { "Mac".into() } else { name.into() }
+}
+
+async fn manifest(State(s): S) -> impl IntoResponse {
+    let body = json!({
+        "name": format!("Approver ({})", s.host),
+        "short_name": "Approver",
+        "description": format!("Approve sudo and Claude Code on {} with your passkey", s.host),
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": "#151c23",
+        "theme_color": "#151c23",
+        "icons": [
+            { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
+            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+        ]
+    });
+    page("application/manifest+json", body.to_string())
+}
+
+async fn push_key(State(s): S) -> Json<Value> {
+    Json(json!({ "key": s.vapid_public, "host": s.host, "passkeys": s.passkeys.lock().await.len() }))
+}
+
+#[derive(Deserialize)]
+struct Endpoint {
+    endpoint: String,
+}
+
+async fn push_check(State(s): S, Json(e): Json<Endpoint>) -> Json<Value> {
+    let known = s.subs.lock().await.iter().any(|p| p.endpoint == e.endpoint);
+    Json(json!({ "known": known }))
+}
+
+/// A passkey challenge for turning notifications on, so only someone with a
+/// registered passkey can have approval links sent to their device.
+async fn push_challenge(State(s): S) -> Result<Json<Value>, StatusCode> {
+    let keys = s.passkeys.lock().await.clone();
+    if keys.is_empty() {
+        return Err(StatusCode::CONFLICT);
+    }
+    let (rcr, auth) = s.webauthn.start_passkey_authentication(&keys).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let id = Uuid::new_v4();
+    let mut logins = s.push_logins.lock().await;
+    logins.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(300));
+    logins.insert(id, (auth, Instant::now()));
+    Ok(Json(json!({ "id": id, "options": rcr })))
+}
+
+#[derive(Deserialize)]
+struct SubKeys {
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(Deserialize)]
+struct Subscription {
+    endpoint: String,
+    keys: SubKeys,
+}
+
+#[derive(Deserialize)]
+struct Subscribe {
+    id: Uuid,
+    credential: PublicKeyCredential,
+    subscription: Subscription,
+}
+
+async fn push_subscribe(State(s): S, headers: axum::http::HeaderMap, Json(r): Json<Subscribe>) -> StatusCode {
+    let Some((auth, t)) = s.push_logins.lock().await.remove(&r.id) else {
+        return StatusCode::NOT_FOUND;
+    };
+    if t.elapsed() > Duration::from_secs(300) {
+        return StatusCode::NOT_FOUND;
+    }
+    let Ok(result) = s.webauthn.finish_passkey_authentication(&r.credential, &auth) else {
+        return StatusCode::UNAUTHORIZED;
+    };
+    {
+        let mut keys = s.passkeys.lock().await;
+        let mut changed = false;
+        for pk in keys.iter_mut() {
+            changed |= pk.update_credential(&result).unwrap_or(false);
+        }
+        if changed {
+            save_passkeys(&s, &keys).await;
+        }
+    }
+    let sub = r.subscription;
+    if !sub.endpoint.starts_with("https://") {
+        return StatusCode::BAD_REQUEST;
+    }
+    let ua = headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    let new = PushSub { endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, device: device_name(ua), added: now_secs() };
+    eprintln!("approverd: notifications on for {} ({})", new.device, endpoint_host(&new.endpoint));
+    let mut subs = s.subs.lock().await;
+    subs.retain(|p| p.endpoint != new.endpoint);
+    subs.push(new);
+    save_subs(&s, &subs);
+    StatusCode::OK
+}
+
+/// "Send a test" on the home page: only to a device that is already on the list.
+async fn push_test_one(State(s): S, Json(e): Json<Endpoint>) -> StatusCode {
+    let Some(sub) = s.subs.lock().await.iter().find(|p| p.endpoint == e.endpoint).cloned() else {
+        return StatusCode::NOT_FOUND;
+    };
+    let payload = json!({ "title": "Test from approverd", "body": format!("Notifications from {} work.", s.host), "url": "/" });
+    match send_push(&s, &sub, &payload).await {
+        Ok(()) => StatusCode::OK,
+        Err((true, _)) => {
+            drop_sub(&s, &sub.endpoint).await;
+            StatusCode::GONE
+        }
+        Err((false, e)) => {
+            eprintln!("approverd: test push to {} failed: {e}", sub.device);
+            StatusCode::BAD_GATEWAY
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What we send must decrypt with the subscriber's keys, as a phone would.
+    #[test]
+    fn push_round_trip() {
+        let (keypair, auth) = ece::generate_keypair_and_auth_secret().unwrap();
+        let components = keypair.raw_components().unwrap();
+        let sub = PushSub {
+            endpoint: "https://web.push.apple.com/QGuQyavXutnMH9lOCbG2xZ".into(),
+            p256dh: Base64UrlSafeNoPadding::encode_to_string(components.public_key()).unwrap(),
+            auth: Base64UrlSafeNoPadding::encode_to_string(auth).unwrap(),
+            device: "iPhone".into(),
+            added: 0,
+        };
+        let (vapid, public) = {
+            let dir = std::env::temp_dir().join(format!("approverd-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let k = vapid_keys(dir.join("vapid.key").to_str().unwrap());
+            std::fs::remove_dir_all(&dir).unwrap();
+            k
+        };
+        let payload = json!({ "title": "Approval needed", "body": "sudo on desk", "url": "/approve/x" });
+        let (headers, body) = build_push(&vapid, "https://desk.example.ts.net", &sub, &payload).unwrap();
+
+        let plain = ece::decrypt(&components, &auth, &body).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&plain).unwrap(), payload);
+
+        let h: HashMap<_, _> = headers.into_iter().collect();
+        assert_eq!(h["content-encoding"], "aes128gcm");
+        assert_eq!(h["ttl"], "60");
+        assert_eq!(h["urgency"], "high");
+        // "vapid t=<jwt>, k=<public key>": the key is the one browsers subscribe
+        // with, and the token is signed by it for this push service and origin.
+        let (t, k) = h["authorization"].strip_prefix("vapid t=").unwrap().split_once(", k=").unwrap();
+        assert_eq!(k, public);
+        use jwt_simple::prelude::*;
+        let pk = ES256PublicKey::from_bytes(&ct_codecs::Base64UrlSafeNoPadding::decode_to_vec(k, None).unwrap()).unwrap();
+        let claims = pk.verify_token::<Value>(t, None).unwrap();
+        assert_eq!(claims.audiences.unwrap().into_string().unwrap(), "https://web.push.apple.com");
+        assert_eq!(claims.subject.as_deref(), Some("https://desk.example.ts.net"));
+    }
+
+    #[test]
+    fn device_names() {
+        assert_eq!(device_name("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X)"), "iPhone");
+        assert_eq!(device_name("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"), "Mac");
+        assert_eq!(device_name(""), "browser");
+    }
 }

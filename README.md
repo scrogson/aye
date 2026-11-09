@@ -3,34 +3,41 @@
 Approve `sudo` (and Claude Code's permission prompts) from your phone, with a
 passkey and Face ID, over your Tailscale network.
 
-When something on the machine needs approval, `approverd` sends a push through
-a self-hosted ntfy. The push carries only a link. The page it opens shows the
-exact command, and Approve or Deny is signed with a passkey that only works for
-this machine. No answer in 60 seconds counts as no answer: sudo falls back to
-your password, and Claude Code shows its own prompt.
+When something on the machine needs approval, `approverd` sends a Web Push
+notification to the Approver web app on your phone's Home Screen. The
+notification says only what kind of request it is. Tapping it opens a page
+that shows the exact command, and Approve or Deny is signed with a passkey that
+only works for this machine. No answer in 60 seconds counts as no answer: sudo
+falls back to your password, and Claude Code shows its own prompt.
 
 ```
-sudo / Claude Code ──► approve ──► approverd (127.0.0.1:7070) ──► ntfy ──► phone
-                                        ▲                                    │
-                                        └──── signed answer (Face ID) ◄──────┘
+sudo / Claude Code ──► approve ──► approverd (127.0.0.1:7070) ──► Web Push ──► phone
+                                        ▲                                       │
+                                        └────── signed answer (Face ID) ◄───────┘
                                    pages on https://<machine>.<tailnet>.ts.net
 ```
+
+Nothing to install on the phone: the app is the pages approverd serves, added
+to the Home Screen. A self-hosted ntfy still works alongside it (see
+[ntfy](#ntfy)).
 
 ## What's in here
 
 | Path | What it is |
 | --- | --- |
-| `src/bin/approverd.rs` | The daemon: local API, approval and registration pages, control socket, and the `approverd` CLI |
+| `src/bin/approverd.rs` | The daemon: local API, Web Push, the pages, control socket, and the `approverd` CLI |
+| `src/bin/*.html`, `sw.js` | The Home Screen app: notifications setup, approval and passkey pages, service worker |
 | `src/bin/approve.rs` | The client: a PAM helper for sudo and a Claude Code hook |
-| `deploy/setup.sh` | Installs ntfy, approverd and `tailscale serve` on this machine |
+| `deploy/setup.sh` | Installs approverd and `tailscale serve` on this machine (and ntfy, if asked) |
 | `deploy/pam.sh` | Adds phone approval to sudo (`test`, `install`, `remove`) |
 | `deploy/claude-hook.sh` | Adds the Claude Code hook to `~/.claude/settings.json` (`install`, `remove`) |
 
 ## Setup
 
-Needs Arch (ntfy comes from the AUR via `yay`), Tailscale with HTTPS enabled
-for the tailnet, `jq`, and a Rust toolchain. Run everything below from a normal
-terminal: `sudo` doesn't work inside the Claude app's terminal.
+Needs Tailscale with HTTPS enabled for the tailnet, `jq`, a Rust toolchain,
+systemd, and an iPhone on iOS 16.4 or later (or any current browser). Run
+everything below from a normal terminal: `sudo` doesn't work inside the Claude
+app's terminal.
 
 1. Build:
 
@@ -38,20 +45,14 @@ terminal: `sudo` doesn't work inside the Claude app's terminal.
    cargo build --release
    ```
 
-2. Install ntfy, approverd and the Tailscale HTTPS endpoints. The script finds
-   this machine's Tailscale name by itself. Set `PHONE_USER` to the ntfy account
-   your phone's ntfy app signs in with (it defaults to your login name, and asks
-   for a password the first time):
+2. Install approverd and the Tailscale HTTPS endpoint. The script finds this
+   machine's Tailscale name by itself:
 
    ```bash
-   PHONE_USER=alice deploy/setup.sh
+   deploy/setup.sh
    ```
 
-3. On the phone, in the ntfy app, add the server
-   `https://<machine>.<tailnet>.ts.net:8443`, sign in as `PHONE_USER` and
-   subscribe to `approvals`.
-
-4. Add the phone's passkey. Registration closes by itself after 10 minutes:
+3. Add the phone's passkey. Registration closes by itself after 10 minutes:
 
    ```bash
    sudo approverd register open
@@ -59,6 +60,12 @@ terminal: `sudo` doesn't work inside the Claude app's terminal.
 
    Then open `https://<machine>.<tailnet>.ts.net/register` on the phone and
    tap **Add passkey**. Add a second device (or a YubiKey) as a backup.
+
+4. Turn on notifications. Open `https://<machine>.<tailnet>.ts.net/` in
+   Safari, tap Share › **Add to Home Screen**, then open **Approver** from the
+   Home Screen and tap **Turn on notifications**. It asks for Face ID, so only
+   someone with a registered passkey can have requests sent to their device.
+   **Send a test** checks the whole path.
 
 On an iPhone, turn off iCloud Private Relay if Safari says the connection
 isn't private: it breaks tailnet names on port 443.
@@ -69,11 +76,34 @@ All commands talk to the running daemon over a root-only socket, so they need
 `sudo`:
 
 ```bash
-sudo approverd status                    # address, passkeys, registration, waiting requests
+sudo approverd status                    # address, passkeys, registration, devices, waiting requests
 sudo approverd register open --for 5m    # 90s, 10m and 1h work too
 sudo approverd register close
 sudo approverd passkeys                  # list passkey ids
 sudo approverd passkeys remove <id>      # 4 or more characters of the id
+sudo approverd push                      # devices that get notifications
+sudo approverd push test                 # send each one a test
+sudo approverd push remove <n>           # stop notifying one (number from the list)
+```
+
+A device that deletes the app or turns notifications off is dropped by itself
+the next time a push to it bounces.
+
+## ntfy
+
+The first version pushed through a self-hosted ntfy, and it still can,
+alongside Web Push. `NTFY=1 deploy/setup.sh` installs ntfy from the AUR
+(Arch), creates the accounts, and serves it on port 8443; `PHONE_USER` names
+the account the ntfy app signs in with. approverd uses ntfy whenever
+`/etc/approver/approverd.env` has `NTFY_URL` and `NTFY_TOKEN`.
+
+To stop using it once Web Push works, drop those two lines and restart:
+
+```bash
+sudo sed -i '/^NTFY_/d' /etc/approver/approverd.env
+sudo systemctl restart approverd
+sudo tailscale serve --https=8443 off
+sudo systemctl disable --now ntfy
 ```
 
 ## sudo
@@ -173,14 +203,23 @@ unanswered request is denied.
 
 ## Security notes
 
-- The pages and ntfy are reachable only on the tailnet, through
-  `tailscale serve`. Don't turn on Funnel for them.
+- The pages are reachable only on the tailnet, through `tailscale serve`.
+  Don't turn on Funnel for them.
 - Every answer, Approve or Deny, needs a passkey signature from a registered
   device. Each challenge works once and only until the request expires.
-- The push says only "Approval waiting on <machine>". The command is shown
-  only on the page, after it loads from the machine over the tailnet.
-- iOS needs ntfy.sh to wake the app (`upstream-base-url`). ntfy.sh sees a
-  hash of the topic URL, never the message. Someone who guesses the topic
-  could send you a fake push, but it can't approve anything.
+- A notification says only "sudo on <machine>" or "Claude Code on
+  <machine>", and a link back to this machine. The command is shown only on
+  the page, after it loads over the tailnet.
+- Web Push goes through Apple's push service. The payload is encrypted for
+  the device (RFC 8291) and signed with this machine's VAPID key (RFC 8292),
+  so Apple can't read it and nobody else can push to the app. The key is
+  made on first start in `/var/lib/private/approver/vapid.key`; deleting it
+  means every device turns notifications on again.
+- Turning on notifications needs a passkey signature, so a visitor on the
+  tailnet can't add their own device.
+- With ntfy: iOS needs ntfy.sh to wake the ntfy app (`upstream-base-url`).
+  ntfy.sh sees a hash of the topic URL, never the message. Someone who
+  guesses the topic could send you a fake push, but it can't approve
+  anything.
 - The local API on 127.0.0.1:7070 accepts requests from any local user, so
   any of them can send you a push. Approving still needs your passkey.
