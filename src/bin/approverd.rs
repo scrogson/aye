@@ -373,6 +373,10 @@ async fn request(State(s): S, Json(r): Json<Req>) -> Json<bool> {
     let (tx, rx) = oneshot::channel();
     let deadline = Instant::now() + TIMEOUT;
     s.pending.lock().await.insert(id, Pending { user, kind, command, deadline, auth: None, done: Some(tx) });
+    // If the asker gives up (Enter at the sudo prompt, Ctrl-C), axum drops
+    // this future; the guard then withdraws the request so the phone page
+    // shows it as expired instead of offering to approve nothing.
+    let mut guard = Withdraw { s: s.clone(), id, live: true };
 
     // The push carries only a link, never the decision or the command.
     let sent = reqwest::Client::new()
@@ -394,9 +398,29 @@ async fn request(State(s): S, Json(r): Json<Req>) -> Json<bool> {
         .ok()
         .and_then(Result::ok)
         .unwrap_or(false);
+    guard.live = false;
     s.pending.lock().await.remove(&id);
     eprintln!("approverd: {id} {}", if ok { "approved" } else { "denied or timed out" });
     Json(ok)
+}
+
+struct Withdraw {
+    s: Arc<App>,
+    id: Uuid,
+    live: bool,
+}
+
+impl Drop for Withdraw {
+    fn drop(&mut self) {
+        if !self.live {
+            return;
+        }
+        let (s, id) = (self.s.clone(), self.id);
+        tokio::spawn(async move {
+            s.pending.lock().await.remove(&id);
+            eprintln!("approverd: {id} withdrawn by the asker");
+        });
+    }
 }
 
 // ---------- approval flow ----------
