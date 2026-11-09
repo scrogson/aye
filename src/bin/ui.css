@@ -133,9 +133,10 @@ ul.facts svg { width: 16px; height: 16px; margin-top: 3px; color: var(--muted); 
 /* Tab bar along the bottom of the app (put in by approverd where a page says <!--tabs-->). */
 /* The home indicator only needs ~20px of the 34px iOS reserves for it. */
 .tabbed { --tabs-pad: max(6px, calc(env(safe-area-inset-bottom) - 14px)); --tabs-h: calc(52px + var(--tabs-pad)); padding-bottom: var(--tabs-h); }
-.tabbed .actions { bottom: var(--tabs-h); padding-bottom: 12px; }
+/* --vp-gap: how far iOS's viewport stops short of the screen bottom (set by the script after the tab bar). */
+.tabbed .actions { bottom: calc(var(--tabs-h) - var(--vp-gap, 0px)); padding-bottom: 12px; }
 .tabs {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+  position: fixed; left: 0; right: 0; bottom: calc(-1 * var(--vp-gap, 0px)); z-index: 2;
   height: var(--tabs-h);
   padding: 0 max(8px, env(safe-area-inset-right)) var(--tabs-pad) max(8px, env(safe-area-inset-left));
   display: grid; grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center;

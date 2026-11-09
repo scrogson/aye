@@ -1,13 +1,13 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
 };
 use ct_codecs::{Base64UrlSafeNoPadding, Encoder};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
@@ -17,10 +17,12 @@ use std::{
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
-    sync::{oneshot, Mutex},
+    sync::{Mutex, oneshot},
     time::Instant,
 };
-use web_push::{ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushMessageBuilder};
+use web_push::{
+    ContentEncoding, SubscriptionInfo, Urgency, VapidSignatureBuilder, WebPushMessageBuilder,
+};
 use webauthn_rs::prelude::*;
 
 /// How long a request waits for an answer before it counts as a deny.
@@ -78,7 +80,11 @@ struct Entry {
 
 impl Entry {
     fn new(event: &str) -> Self {
-        Entry { at: now_secs(), event: event.into(), ..Default::default() }
+        Entry {
+            at: now_secs(),
+            event: event.into(),
+            ..Default::default()
+        }
     }
     fn detail(mut self, d: impl Into<String>) -> Self {
         self.detail = Some(d.into());
@@ -130,13 +136,20 @@ struct App {
 
 impl App {
     async fn registration_open(&self) -> bool {
-        self.register_until.lock().await.is_some_and(|t| t > Instant::now())
+        self.register_until
+            .lock()
+            .await
+            .is_some_and(|t| t > Instant::now())
     }
 
     /// Add to the activity log, in memory and appended to activity.jsonl.
     async fn record(&self, e: Entry) {
         let line = serde_json::to_string(&e).unwrap() + "\n";
-        let file = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(&self.activity_file);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(&self.activity_file);
         if let Err(e) = file.and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes())) {
             eprintln!("approverd: can't write {}: {e}", self.activity_file);
         }
@@ -151,10 +164,16 @@ impl App {
 /// Read the activity log, trimming the file to the last KEEP entries.
 fn load_activity(path: &str) -> VecDeque<Entry> {
     let text = std::fs::read_to_string(path).unwrap_or_default();
-    let mut log: VecDeque<Entry> = text.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let mut log: VecDeque<Entry> = text
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
     if log.len() > KEEP {
         log.drain(..log.len() - KEEP);
-        let body: String = log.iter().map(|e| serde_json::to_string(e).unwrap() + "\n").collect();
+        let body: String = log
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap() + "\n")
+            .collect();
         let tmp = format!("{path}.tmp");
         if std::fs::write(&tmp, body).is_ok() {
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
@@ -185,10 +204,14 @@ async fn main() {
     let cmd = match args.as_slice() {
         [] | ["serve"] => return serve().await,
         ["status"] => json!({ "cmd": "status" }),
-        ["register", "open"] => json!({ "cmd": "register_open", "seconds": REGISTER_FOR.as_secs() }),
+        ["register", "open"] => {
+            json!({ "cmd": "register_open", "seconds": REGISTER_FOR.as_secs() })
+        }
         ["register", "open", "--for", d] => match parse_duration(d) {
             Some(d) => json!({ "cmd": "register_open", "seconds": d.as_secs() }),
-            None => exit_usage(&format!("can't read {d:?} as a duration; try 10m, 90s or 1h")),
+            None => exit_usage(&format!(
+                "can't read {d:?} as a duration; try 10m, 90s or 1h"
+            )),
         },
         ["register", "close"] => json!({ "cmd": "register_close" }),
         ["passkeys"] | ["passkeys", "list"] => json!({ "cmd": "passkeys" }),
@@ -238,7 +261,13 @@ async fn control_client(cmd: Value) -> i32 {
     let mut tries = 0;
     let connected = loop {
         match UnixStream::connect(&path).await {
-            Err(e) if tries < 30 && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+            Err(e)
+                if tries < 30
+                    && matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                    ) =>
+            {
                 tries += 1;
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
@@ -252,17 +281,24 @@ async fn control_client(cmd: Value) -> i32 {
             return 1;
         }
         Err(e) => {
-            eprintln!("approverd: can't reach the daemon at {path}: {e}\nIs it running? systemctl status approverd");
+            eprintln!(
+                "approverd: can't reach the daemon at {path}: {e}\nIs it running? systemctl status approverd"
+            );
             return 1;
         }
     };
-    if stream.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
+    if stream
+        .write_all(format!("{cmd}\n").as_bytes())
+        .await
+        .is_err()
+    {
         eprintln!("approverd: the daemon closed the connection");
         return 1;
     }
     let mut line = String::new();
     let _ = BufReader::new(stream).read_line(&mut line).await;
-    let reply: Value = serde_json::from_str(&line).unwrap_or_else(|_| json!({ "ok": false, "text": "no answer from the daemon" }));
+    let reply: Value = serde_json::from_str(&line)
+        .unwrap_or_else(|_| json!({ "ok": false, "text": "no answer from the daemon" }));
     let text = reply["text"].as_str().unwrap_or_default();
     if reply["ok"].as_bool() == Some(true) {
         println!("{text}");
@@ -297,7 +333,11 @@ async fn serve() {
         .unwrap_or_default();
     let activity_file = format!("{state_dir}/activity.jsonl");
     let activity = load_activity(&activity_file);
-    eprintln!("approverd: {origin}, {} passkey(s), {} device(s) for notifications", passkeys.len(), subs.len());
+    eprintln!(
+        "approverd: {origin}, {} passkey(s), {} device(s) for notifications",
+        passkeys.len(),
+        subs.len()
+    );
     let app = Arc::new(App {
         webauthn,
         host: rp_id.split('.').next().unwrap_or(&rp_id).to_string(),
@@ -324,30 +364,62 @@ async fn serve() {
         .route("/local/ask", post(ask))
         .with_state(app.clone());
     let public = Router::new()
-        .route("/", get(|| async { page("text/html; charset=utf-8", HOME.as_str()) }))
-        .route("/sw.js", get(|| async { page("text/javascript; charset=utf-8", include_str!("sw.js")) }))
+        .route(
+            "/",
+            get(|| async { page("text/html; charset=utf-8", HOME.as_str()) }),
+        )
+        .route(
+            "/sw.js",
+            get(|| async { page("text/javascript; charset=utf-8", include_str!("sw.js")) }),
+        )
         .route("/manifest.webmanifest", get(manifest))
-        .route("/icon-180.png", get(|| async { page("image/png", &include_bytes!("icon-180.png")[..]) }))
-        .route("/icon-192.png", get(|| async { page("image/png", &include_bytes!("icon-192.png")[..]) }))
-        .route("/icon-512.png", get(|| async { page("image/png", &include_bytes!("icon-512.png")[..]) }))
+        .route(
+            "/icon-180.png",
+            get(|| async { page("image/png", &include_bytes!("icon-180.png")[..]) }),
+        )
+        .route(
+            "/icon-192.png",
+            get(|| async { page("image/png", &include_bytes!("icon-192.png")[..]) }),
+        )
+        .route(
+            "/icon-512.png",
+            get(|| async { page("image/png", &include_bytes!("icon-512.png")[..]) }),
+        )
         .route("/push/key", get(push_key))
         .route("/push/check", post(push_check))
         .route("/login/challenge", post(login_challenge))
         .route("/push/subscribe", post(push_subscribe))
         .route("/push/test", post(push_test_one))
-        .route("/activity", get(|| async { page("text/html; charset=utf-8", ACTIVITY.as_str()) }))
+        .route(
+            "/activity",
+            get(|| async { page("text/html; charset=utf-8", ACTIVITY.as_str()) }),
+        )
         .route("/activity/login", post(activity_login))
         .route("/activity/data", get(activity_data))
-        .route("/ui.css", get(|| async { page("text/css; charset=utf-8", include_str!("ui.css")) }))
-        .route("/approve/{id}", get(|| async { page("text/html; charset=utf-8", APPROVE.as_str()) }))
+        .route(
+            "/ui.css",
+            get(|| async { page("text/css; charset=utf-8", include_str!("ui.css")) }),
+        )
+        .route(
+            "/approve/{id}",
+            get(|| async { page("text/html; charset=utf-8", APPROVE.as_str()) }),
+        )
         .route("/approve/{id}/challenge", post(challenge))
         .route("/approve/{id}/verify", post(verify))
-        .route("/register", get(|| async { page("text/html; charset=utf-8", REGISTER.as_str()) }))
+        .route(
+            "/register",
+            get(|| async { page("text/html; charset=utf-8", REGISTER.as_str()) }),
+        )
         .route("/register/status", get(reg_status))
         .route("/register/start", post(reg_start))
         .route("/register/finish", post(reg_finish))
         // A real page, not an empty body a browser might keep showing.
-        .fallback(|| async { (StatusCode::NOT_FOUND, page("text/html; charset=utf-8", NOT_FOUND)) })
+        .fallback(|| async {
+            (
+                StatusCode::NOT_FOUND,
+                page("text/html; charset=utf-8", NOT_FOUND),
+            )
+        })
         .with_state(app);
 
     // Overridable only so a test copy can run beside the installed one.
@@ -370,7 +442,9 @@ async fn control_server(s: Arc<App>, path: String) {
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let owner = std::fs::metadata(&path).unwrap().uid();
     loop {
-        let Ok((stream, _)) = listener.accept().await else { continue };
+        let Ok((stream, _)) = listener.accept().await else {
+            continue;
+        };
         // The file mode already keeps others out; this also refuses anyone
         // who got hold of the socket some other way.
         let uid = stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
@@ -397,7 +471,10 @@ fn cred_id(pk: &Passkey) -> String {
 }
 
 fn cred_str(c: &CredentialID) -> String {
-    serde_json::to_value(c).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+    serde_json::to_value(c)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
 }
 
 /// Enough of a passkey id to tell them apart (`approverd passkeys` shows it all).
@@ -416,7 +493,9 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
         "status" => {
             let keys = s.passkeys.lock().await.len();
             let reg = match *s.register_until.lock().await {
-                Some(t) if t > Instant::now() => format!("open, closes in {}", mins_secs(t - Instant::now())),
+                Some(t) if t > Instant::now() => {
+                    format!("open, closes in {}", mins_secs(t - Instant::now()))
+                }
                 _ => "closed".into(),
             };
             let waiting = s.pending.lock().await.len();
@@ -429,12 +508,23 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
         "push" => {
             let subs = s.subs.lock().await;
             if subs.is_empty() {
-                return ok(format!("No devices get notifications. Open {}/ on the phone to turn them on.", s.origin));
+                return ok(format!(
+                    "No devices get notifications. Open {}/ on the phone to turn them on.",
+                    s.origin
+                ));
             }
             let lines: Vec<String> = subs
                 .iter()
                 .enumerate()
-                .map(|(i, p)| format!("{:>2}  {:<8} added {}  via {}", i + 1, p.device, ago(p.added), endpoint_host(&p.endpoint)))
+                .map(|(i, p)| {
+                    format!(
+                        "{:>2}  {:<8} added {}  via {}",
+                        i + 1,
+                        p.device,
+                        ago(p.added),
+                        endpoint_host(&p.endpoint)
+                    )
+                })
                 .collect();
             ok(lines.join("\n"))
         }
@@ -452,7 +542,9 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                 }
                 lines.push(match r {
                     Ok(()) => format!("{:>2}  {:<8} sent", i + 1, sub.device),
-                    Err((true, e)) => format!("{:>2}  {:<8} gone, removed ({e})", i + 1, sub.device),
+                    Err((true, e)) => {
+                        format!("{:>2}  {:<8} gone, removed ({e})", i + 1, sub.device)
+                    }
                     Err((false, e)) => format!("{:>2}  {:<8} failed: {e}", i + 1, sub.device),
                 });
             }
@@ -467,15 +559,28 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
             let gone = subs.remove(n - 1);
             save_subs(s, &subs);
             drop(subs);
-            s.record(Entry::new("device_removed").detail(gone.device.clone())).await;
+            s.record(Entry::new("device_removed").detail(gone.device.clone()))
+                .await;
             let subs = s.subs.lock().await;
-            ok(format!("Stopped notifying {} ({}). {} device(s) left.", gone.device, ago(gone.added), subs.len()))
+            ok(format!(
+                "Stopped notifying {} ({}). {} device(s) left.",
+                gone.device,
+                ago(gone.added),
+                subs.len()
+            ))
         }
         "register_open" => {
-            let secs = cmd["seconds"].as_u64().unwrap_or(REGISTER_FOR.as_secs()).clamp(1, 24 * 3600);
+            let secs = cmd["seconds"]
+                .as_u64()
+                .unwrap_or(REGISTER_FOR.as_secs())
+                .clamp(1, 24 * 3600);
             *s.register_until.lock().await = Some(Instant::now() + Duration::from_secs(secs));
             eprintln!("approverd: registration open for {secs}s");
-            s.record(Entry::new("registration_opened").detail(format!("for {}", mins_secs(Duration::from_secs(secs))))).await;
+            s.record(
+                Entry::new("registration_opened")
+                    .detail(format!("for {}", mins_secs(Duration::from_secs(secs)))),
+            )
+            .await;
             ok(format!(
                 "Registration is open for {}. On the device, open {}/register\nIt closes by itself; to close it now: sudo approverd register close",
                 mins_secs(Duration::from_secs(secs)),
@@ -492,18 +597,31 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
         "passkeys" => {
             let keys = s.passkeys.lock().await;
             if keys.is_empty() {
-                return ok("No passkeys registered. Add one with: sudo approverd register open".into());
+                return ok(
+                    "No passkeys registered. Add one with: sudo approverd register open".into(),
+                );
             }
-            let lines: Vec<String> = keys.iter().enumerate().map(|(i, k)| format!("{:>2}  {}", i + 1, cred_id(k))).collect();
+            let lines: Vec<String> = keys
+                .iter()
+                .enumerate()
+                .map(|(i, k)| format!("{:>2}  {}", i + 1, cred_id(k)))
+                .collect();
             ok(lines.join("\n"))
         }
         "passkeys_remove" => {
             let want = cmd["id"].as_str().unwrap_or_default();
             if want.len() < 4 {
-                return fail("give at least 4 characters of the passkey id (see: approverd passkeys)".into());
+                return fail(
+                    "give at least 4 characters of the passkey id (see: approverd passkeys)".into(),
+                );
             }
             let mut keys = s.passkeys.lock().await;
-            let hits: Vec<usize> = keys.iter().enumerate().filter(|(_, k)| cred_id(k).starts_with(want)).map(|(i, _)| i).collect();
+            let hits: Vec<usize> = keys
+                .iter()
+                .enumerate()
+                .filter(|(_, k)| cred_id(k).starts_with(want))
+                .map(|(i, _)| i)
+                .collect();
             match hits.as_slice() {
                 [i] => {
                     let gone = cred_id(&keys.remove(*i));
@@ -511,11 +629,15 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                     let left = keys.len();
                     drop(keys);
                     eprintln!("approverd: removed passkey {gone}");
-                    s.record(Entry::new("passkey_removed").detail(short(&gone))).await;
+                    s.record(Entry::new("passkey_removed").detail(short(&gone)))
+                        .await;
                     ok(format!("Removed {gone}. {left} passkey(s) left."))
                 }
                 [] => fail(format!("no passkey id starts with {want:?}")),
-                _ => fail(format!("{} passkeys start with {want:?}; give more of the id", hits.len())),
+                _ => fail(format!(
+                    "{} passkeys start with {want:?}; give more of the id",
+                    hits.len()
+                )),
             }
         }
         "log" => {
@@ -531,7 +653,11 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                 .take(n)
                 .rev()
                 .map(|e| {
-                    let mut line = format!("{:>9}  {:<20}", ago_short(now.saturating_sub(e.at)), e.event);
+                    let mut line = format!(
+                        "{:>9}  {:<20}",
+                        ago_short(now.saturating_sub(e.at)),
+                        e.event
+                    );
                     if let Some(k) = &e.kind {
                         line += &format!(" {:<11}", kind_label(k));
                     }
@@ -553,15 +679,29 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
 
 // The pages, each with the tab bar put in where it says <!--tabs-->.
 static HOME: LazyLock<String> = LazyLock::new(|| with_tabs(include_str!("home.html"), "/"));
-static ACTIVITY: LazyLock<String> = LazyLock::new(|| with_tabs(include_str!("activity.html"), "/activity"));
-static REGISTER: LazyLock<String> = LazyLock::new(|| with_tabs(include_str!("register.html"), "/register"));
+static ACTIVITY: LazyLock<String> =
+    LazyLock::new(|| with_tabs(include_str!("activity.html"), "/activity"));
+static REGISTER: LazyLock<String> =
+    LazyLock::new(|| with_tabs(include_str!("register.html"), "/register"));
 static APPROVE: LazyLock<String> = LazyLock::new(|| with_tabs(include_str!("approve.html"), ""));
 
 fn with_tabs(html: &str, active: &str) -> String {
     const TABS: [(&str, &str, &str); 3] = [
-        ("/", "Notifications", r#"<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>"#),
-        ("/activity", "Activity", r#"<path d="M4 6.5h2M4 12h2M4 17.5h2M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/>"#),
-        ("/register", "Passkeys", r#"<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/>"#),
+        (
+            "/",
+            "Notifications",
+            r#"<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/>"#,
+        ),
+        (
+            "/activity",
+            "Activity",
+            r#"<path d="M4 6.5h2M4 12h2M4 17.5h2M9.5 6.5H20M9.5 12H20M9.5 17.5H20"/>"#,
+        ),
+        (
+            "/register",
+            "Passkeys",
+            r#"<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/>"#,
+        ),
     ];
     let links: String = TABS
         .iter()
@@ -573,8 +713,29 @@ fn with_tabs(html: &str, active: &str) -> String {
         })
         .collect();
     assert!(html.contains("<!--tabs-->"), "page is missing <!--tabs-->");
-    html.replace("<!--tabs-->", &format!(r#"<nav class="tabs" aria-label="Approver">{links}</nav>"#))
+    html.replace(
+        "<!--tabs-->",
+        &format!(r#"<nav class="tabs" aria-label="Approver">{links}</nav><script>{VIEWPORT_FIX}</script>"#),
+    )
 }
+
+/// On iOS, a Home Screen app can lay fixed elements out in a viewport that
+/// stops short of the bottom of the screen (by the status bar's height),
+/// leaving the tab bar floating with blank space under it. Measure how far
+/// short it stops and let the CSS move the bar down by that much.
+const VIEWPORT_FIX: &str = r#"(()=>{
+if(navigator.standalone!==true)return; // iOS Home Screen apps only
+const p=document.createElement("div");
+p.style.cssText="position:fixed;left:0;bottom:0;width:0;height:0;visibility:hidden";
+document.body.append(p);
+const fit=()=>{
+  const land=innerWidth>innerHeight;
+  const screenH=land?Math.min(screen.width,screen.height):Math.max(screen.width,screen.height);
+  const gap=Math.round(screenH-p.getBoundingClientRect().bottom);
+  document.documentElement.style.setProperty("--vp-gap",(gap>0&&gap<120?gap:0)+"px");
+};
+fit();addEventListener("resize",fit);addEventListener("orientationchange",()=>setTimeout(fit,300));
+})();"#;
 
 /// A page or stylesheet: never cached, never framed (so the Approve button
 /// can't be overlaid by another site), and only able to talk to this origin.
@@ -638,7 +799,10 @@ async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
     let (user, command) = match (r.user, r.command, r.summary) {
         (user, Some(command), _) => (user.unwrap_or_default(), command),
         (_, None, Some(summary)) => match summary.split_once(": ") {
-            Some((who, cmd)) => (who.split('@').next().unwrap_or(who).to_string(), cmd.to_string()),
+            Some((who, cmd)) => (
+                who.split('@').next().unwrap_or(who).to_string(),
+                cmd.to_string(),
+            ),
             None => (String::new(), summary),
         },
         _ => return None,
@@ -649,18 +813,37 @@ async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
     let id = Uuid::new_v4();
     let (tx, rx) = oneshot::channel();
     let deadline = Instant::now() + TIMEOUT;
-    s.pending.lock().await.insert(id, Pending { user, kind, command, deadline, auth: None, done: Some(tx) });
+    s.pending.lock().await.insert(
+        id,
+        Pending {
+            user,
+            kind,
+            command,
+            deadline,
+            auth: None,
+            done: Some(tx),
+        },
+    );
     // If the asker gives up (Enter at the sudo prompt, Ctrl-C), axum drops
     // this future; the guard then withdraws the request so the phone page
     // shows it as expired instead of offering to approve nothing.
-    let mut guard = Withdraw { s: s.clone(), id, live: true };
+    let mut guard = Withdraw {
+        s: s.clone(),
+        id,
+        live: true,
+    };
 
     tokio::spawn(notify(s.clone(), id, what));
 
-    let answer = tokio::time::timeout_at(deadline, rx).await.ok().and_then(Result::ok);
+    let answer = tokio::time::timeout_at(deadline, rx)
+        .await
+        .ok()
+        .and_then(Result::ok);
     guard.live = false;
     let p = s.pending.lock().await.remove(&id);
-    let waited = TIMEOUT.saturating_sub(deadline.saturating_duration_since(Instant::now())).as_secs();
+    let waited = TIMEOUT
+        .saturating_sub(deadline.saturating_duration_since(Instant::now()))
+        .as_secs();
     let (event, detail) = match &answer {
         Some((true, by)) => ("approved", format!("in {waited}s, passkey {}", short(by))),
         Some((false, by)) => ("denied", format!("in {waited}s, passkey {}", short(by))),
@@ -689,8 +872,15 @@ impl Drop for Withdraw {
             let p = s.pending.lock().await.remove(&id);
             eprintln!("approverd: {id} withdrawn by the asker");
             if let Some(p) = p {
-                let waited = TIMEOUT.saturating_sub(p.deadline.saturating_duration_since(Instant::now())).as_secs();
-                s.record(Entry::new("withdrawn").request(&p).detail(format!("cancelled after {waited}s"))).await;
+                let waited = TIMEOUT
+                    .saturating_sub(p.deadline.saturating_duration_since(Instant::now()))
+                    .as_secs();
+                s.record(
+                    Entry::new("withdrawn")
+                        .request(&p)
+                        .detail(format!("cancelled after {waited}s")),
+                )
+                .await;
             }
         });
     }
@@ -700,7 +890,9 @@ impl Drop for Withdraw {
 
 async fn challenge(State(s): S, Path(id): Path<Uuid>) -> Result<Json<Value>, StatusCode> {
     let keys = s.passkeys.lock().await.clone();
-    let (rcr, auth) = s.webauthn.start_passkey_authentication(&keys)
+    let (rcr, auth) = s
+        .webauthn
+        .start_passkey_authentication(&keys)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut p = s.pending.lock().await;
     let entry = p.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
@@ -717,7 +909,10 @@ async fn challenge(State(s): S, Path(id): Path<Uuid>) -> Result<Json<Value>, Sta
 }
 
 #[derive(Deserialize)]
-struct Verify { approve: bool, credential: PublicKeyCredential }
+struct Verify {
+    approve: bool,
+    credential: PublicKeyCredential,
+}
 
 async fn verify(State(s): S, Path(id): Path<Uuid>, Json(v): Json<Verify>) -> StatusCode {
     let auth = {
@@ -727,10 +922,22 @@ async fn verify(State(s): S, Path(id): Path<Uuid>, Json(v): Json<Verify>) -> Sta
             None => return StatusCode::NOT_FOUND,
         }
     };
-    let Ok(result) = s.webauthn.finish_passkey_authentication(&v.credential, &auth) else {
-        let e = s.pending.lock().await.get(&id).map(|p| Entry::new("bad_signature").request(p));
+    let Ok(result) = s
+        .webauthn
+        .finish_passkey_authentication(&v.credential, &auth)
+    else {
+        let e = s
+            .pending
+            .lock()
+            .await
+            .get(&id)
+            .map(|p| Entry::new("bad_signature").request(p));
         if let Some(e) = e {
-            s.record(e.detail(format!("tried to {}", if v.approve { "approve" } else { "deny" }))).await;
+            s.record(e.detail(format!(
+                "tried to {}",
+                if v.approve { "approve" } else { "deny" }
+            )))
+            .await;
         }
         return StatusCode::UNAUTHORIZED;
     };
@@ -745,7 +952,13 @@ async fn verify(State(s): S, Path(id): Path<Uuid>, Json(v): Json<Verify>) -> Sta
             save_passkeys(&s, &keys).await;
         }
     }
-    if let Some(tx) = s.pending.lock().await.get_mut(&id).and_then(|e| e.done.take()) {
+    if let Some(tx) = s
+        .pending
+        .lock()
+        .await
+        .get_mut(&id)
+        .and_then(|e| e.done.take())
+    {
         let _ = tx.send((v.approve, cred_str(result.cred_id())));
     }
     StatusCode::OK
@@ -763,37 +976,68 @@ async fn reg_status(State(s): S) -> Json<Value> {
 }
 
 async fn reg_start(State(s): S) -> Result<Json<CreationChallengeResponse>, StatusCode> {
-    if !s.registration_open().await { return Err(StatusCode::FORBIDDEN); }
-    let exclude: Vec<_> = s.passkeys.lock().await.iter().map(|k| k.cred_id().clone()).collect();
-    let (ccr, reg) = s.webauthn
+    if !s.registration_open().await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let exclude: Vec<_> = s
+        .passkeys
+        .lock()
+        .await
+        .iter()
+        .map(|k| k.cred_id().clone())
+        .collect();
+    let (ccr, reg) = s
+        .webauthn
         .start_passkey_registration(Uuid::new_v4(), "approver", "Approver", Some(exclude))
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     *s.reg.lock().await = Some(reg);
     Ok(Json(ccr))
 }
 
-async fn reg_finish(State(s): S, headers: HeaderMap, Json(c): Json<RegisterPublicKeyCredential>) -> StatusCode {
-    if !s.registration_open().await { return StatusCode::FORBIDDEN; }
-    let Some(reg) = s.reg.lock().await.take() else { return StatusCode::BAD_REQUEST };
-    let Ok(pk) = s.webauthn.finish_passkey_registration(&c, &reg) else { return StatusCode::UNAUTHORIZED };
+async fn reg_finish(
+    State(s): S,
+    headers: HeaderMap,
+    Json(c): Json<RegisterPublicKeyCredential>,
+) -> StatusCode {
+    if !s.registration_open().await {
+        return StatusCode::FORBIDDEN;
+    }
+    let Some(reg) = s.reg.lock().await.take() else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Ok(pk) = s.webauthn.finish_passkey_registration(&c, &reg) else {
+        return StatusCode::UNAUTHORIZED;
+    };
     let id = cred_id(&pk);
     let mut keys = s.passkeys.lock().await;
     keys.push(pk);
     save_passkeys(&s, &keys).await;
     eprintln!("approverd: registered passkey #{}", keys.len());
     drop(keys);
-    s.record(Entry::new("passkey_added").detail(format!("{} from {}", short(&id), device_name(user_agent(&headers))))).await;
+    s.record(Entry::new("passkey_added").detail(format!(
+        "{} from {}",
+        short(&id),
+        device_name(user_agent(&headers))
+    )))
+    .await;
     StatusCode::OK
 }
 
 fn user_agent(headers: &HeaderMap) -> &str {
-    headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default()
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
 }
 
 // ---------- notifications: Web Push to the home-screen app ----------
 
 fn kind_label(kind: &str) -> &'static str {
-    if kind == "claude" { "Claude Code" } else { "sudo" }
+    if kind == "claude" {
+        "Claude Code"
+    } else {
+        "sudo"
+    }
 }
 
 /// Every push carries only a link and what kind of request it is, never the
@@ -807,19 +1051,27 @@ async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
     });
     let subs = s.subs.lock().await.clone();
     if subs.is_empty() {
-        eprintln!("approverd: no device gets notifications; open {}/ on the phone to turn them on", s.origin);
+        eprintln!(
+            "approverd: no device gets notifications; open {}/ on the phone to turn them on",
+            s.origin
+        );
     }
     for sub in &subs {
         match send_push(&s, sub, &payload).await {
             Ok(()) => {}
             Err((true, e)) => {
-                eprintln!("approverd: {} stopped accepting pushes ({e}); removed", sub.device);
+                eprintln!(
+                    "approverd: {} stopped accepting pushes ({e}); removed",
+                    sub.device
+                );
                 drop_sub(&s, &sub.endpoint).await;
-                s.record(Entry::new("device_gone").detail(format!("{}: {e}", sub.device))).await;
+                s.record(Entry::new("device_gone").detail(format!("{}: {e}", sub.device)))
+                    .await;
             }
             Err((false, e)) => {
                 eprintln!("approverd: push to {} failed: {e}", sub.device);
-                s.record(Entry::new("push_failed").detail(format!("{}: {e}", sub.device))).await;
+                s.record(Entry::new("push_failed").detail(format!("{}: {e}", sub.device)))
+                    .await;
             }
         }
     }
@@ -834,13 +1086,20 @@ async fn send_push(s: &App, sub: &PushSub, payload: &Value) -> Result<(), (bool,
     for (k, v) in parts {
         req = req.header(k, v);
     }
-    let r = req.timeout(Duration::from_secs(15)).send().await.map_err(|e| (false, e.to_string()))?;
+    let r = req
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| (false, e.to_string()))?;
     match r.status().as_u16() {
         200..=299 => Ok(()),
         404 | 410 => Err((true, format!("HTTP {}", r.status()))),
         code => {
             let text = r.text().await.unwrap_or_default();
-            Err((false, format!("HTTP {code} {}", text.chars().take(200).collect::<String>())))
+            Err((
+                false,
+                format!("HTTP {code} {}", text.chars().take(200).collect::<String>()),
+            ))
         }
     }
 }
@@ -848,9 +1107,19 @@ async fn send_push(s: &App, sub: &PushSub, payload: &Value) -> Result<(), (bool,
 /// Headers and the encrypted body, ready to POST to the push service.
 type PushRequest = (Vec<(String, String)>, Vec<u8>);
 
-fn build_push(vapid_key: &str, origin: &str, sub: &PushSub, payload: &Value) -> Result<PushRequest, String> {
-    let info = SubscriptionInfo::new(sub.endpoint.as_str(), sub.p256dh.as_str(), sub.auth.as_str());
-    let mut sig = VapidSignatureBuilder::from_base64(vapid_key, &info).map_err(|e| e.to_string())?;
+fn build_push(
+    vapid_key: &str,
+    origin: &str,
+    sub: &PushSub,
+    payload: &Value,
+) -> Result<PushRequest, String> {
+    let info = SubscriptionInfo::new(
+        sub.endpoint.as_str(),
+        sub.p256dh.as_str(),
+        sub.auth.as_str(),
+    );
+    let mut sig =
+        VapidSignatureBuilder::from_base64(vapid_key, &info).map_err(|e| e.to_string())?;
     // Apple wants a contact; this machine's address is enough and isn't personal.
     sig.add_claim("sub", origin);
     let sig = sig.build().map_err(|e| e.to_string())?;
@@ -886,7 +1155,10 @@ fn vapid_keys(path: &str) -> (String, String) {
     let public = VapidSignatureBuilder::from_base64_no_sub(&key)
         .unwrap_or_else(|_| panic!("{path} isn't a VAPID key; delete it to make a new one (devices then turn notifications on again)"))
         .get_public_key();
-    (key, Base64UrlSafeNoPadding::encode_to_string(public).unwrap())
+    (
+        key,
+        Base64UrlSafeNoPadding::encode_to_string(public).unwrap(),
+    )
 }
 
 fn save_subs(s: &App, subs: &[PushSub]) {
@@ -904,7 +1176,10 @@ async fn drop_sub(s: &App, endpoint: &str) {
 }
 
 fn now_secs() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn ago_short(secs: u64) -> String {
@@ -925,7 +1200,10 @@ fn ago(t: u64) -> String {
 }
 
 fn endpoint_host(endpoint: &str) -> String {
-    Url::parse(endpoint).ok().and_then(|u| u.host_str().map(str::to_string)).unwrap_or_else(|| "?".into())
+    Url::parse(endpoint)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| "?".into())
 }
 
 fn device_name(ua: &str) -> String {
@@ -933,7 +1211,11 @@ fn device_name(ua: &str) -> String {
         .into_iter()
         .find(|d| ua.contains(d))
         .unwrap_or("browser");
-    if name == "Macintosh" { "Mac".into() } else { name.into() }
+    if name == "Macintosh" {
+        "Mac".into()
+    } else {
+        name.into()
+    }
 }
 
 async fn manifest(State(s): S) -> impl IntoResponse {
@@ -955,7 +1237,9 @@ async fn manifest(State(s): S) -> impl IntoResponse {
 }
 
 async fn push_key(State(s): S) -> Json<Value> {
-    Json(json!({ "key": s.vapid_public, "host": s.host, "passkeys": s.passkeys.lock().await.len() }))
+    Json(
+        json!({ "key": s.vapid_public, "host": s.host, "passkeys": s.passkeys.lock().await.len() }),
+    )
 }
 
 #[derive(Deserialize)]
@@ -978,7 +1262,10 @@ async fn login_challenge(State(s): S) -> Result<Json<Value>, StatusCode> {
     if keys.is_empty() {
         return Err(StatusCode::CONFLICT);
     }
-    let (rcr, auth) = s.webauthn.start_passkey_authentication(&keys).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (rcr, auth) = s
+        .webauthn
+        .start_passkey_authentication(&keys)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let id = Uuid::new_v4();
     let mut logins = s.logins.lock().await;
     logins.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(300));
@@ -988,7 +1275,12 @@ async fn login_challenge(State(s): S) -> Result<Json<Value>, StatusCode> {
 
 /// Check a signed login challenge (single use, 5 minutes) and bump the
 /// passkey's counter. Returns the signing passkey's id.
-async fn check_login(s: &App, id: Uuid, credential: &PublicKeyCredential, why: &str) -> Result<String, StatusCode> {
+async fn check_login(
+    s: &App,
+    id: Uuid,
+    credential: &PublicKeyCredential,
+    why: &str,
+) -> Result<String, StatusCode> {
     let Some((auth, t)) = s.logins.lock().await.remove(&id) else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -996,7 +1288,8 @@ async fn check_login(s: &App, id: Uuid, credential: &PublicKeyCredential, why: &
         return Err(StatusCode::NOT_FOUND);
     }
     let Ok(result) = s.webauthn.finish_passkey_authentication(credential, &auth) else {
-        s.record(Entry::new("bad_signature").detail(why.to_string())).await;
+        s.record(Entry::new("bad_signature").detail(why.to_string()))
+            .await;
         return Err(StatusCode::UNAUTHORIZED);
     };
     let mut keys = s.passkeys.lock().await;
@@ -1038,9 +1331,20 @@ async fn push_subscribe(State(s): S, headers: HeaderMap, Json(r): Json<Subscribe
         Ok(by) => by,
         Err(code) => return code,
     };
-    let new = PushSub { endpoint: sub.endpoint, p256dh: sub.keys.p256dh, auth: sub.keys.auth, device: device_name(user_agent(&headers)), added: now_secs() };
-    s.record(Entry::new("device_added").detail(format!("{}, passkey {}", new.device, short(&by)))).await;
-    eprintln!("approverd: notifications on for {} ({})", new.device, endpoint_host(&new.endpoint));
+    let new = PushSub {
+        endpoint: sub.endpoint,
+        p256dh: sub.keys.p256dh,
+        auth: sub.keys.auth,
+        device: device_name(user_agent(&headers)),
+        added: now_secs(),
+    };
+    s.record(Entry::new("device_added").detail(format!("{}, passkey {}", new.device, short(&by))))
+        .await;
+    eprintln!(
+        "approverd: notifications on for {} ({})",
+        new.device,
+        endpoint_host(&new.endpoint)
+    );
     let mut subs = s.subs.lock().await;
     subs.retain(|p| p.endpoint != new.endpoint);
     subs.push(new);
@@ -1050,7 +1354,14 @@ async fn push_subscribe(State(s): S, headers: HeaderMap, Json(r): Json<Subscribe
 
 /// "Send a test" on the home page: only to a device that is already on the list.
 async fn push_test_one(State(s): S, Json(e): Json<Endpoint>) -> StatusCode {
-    let Some(sub) = s.subs.lock().await.iter().find(|p| p.endpoint == e.endpoint).cloned() else {
+    let Some(sub) = s
+        .subs
+        .lock()
+        .await
+        .iter()
+        .find(|p| p.endpoint == e.endpoint)
+        .cloned()
+    else {
         return StatusCode::NOT_FOUND;
     };
     let payload = json!({ "title": "Test from approverd", "body": format!("Notifications from {} work.", s.host), "url": "/" });
@@ -1090,8 +1401,10 @@ mod tests {
             std::fs::remove_dir_all(&dir).unwrap();
             k
         };
-        let payload = json!({ "title": "Approval needed", "body": "sudo on desk", "url": "/approve/x" });
-        let (headers, body) = build_push(&vapid, "https://desk.example.ts.net", &sub, &payload).unwrap();
+        let payload =
+            json!({ "title": "Approval needed", "body": "sudo on desk", "url": "/approve/x" });
+        let (headers, body) =
+            build_push(&vapid, "https://desk.example.ts.net", &sub, &payload).unwrap();
 
         let plain = ece::decrypt(&components, &auth, &body).unwrap();
         assert_eq!(serde_json::from_slice::<Value>(&plain).unwrap(), payload);
@@ -1102,19 +1415,38 @@ mod tests {
         assert_eq!(h["urgency"], "high");
         // "vapid t=<jwt>, k=<public key>": the key is the one browsers subscribe
         // with, and the token is signed by it for this push service and origin.
-        let (t, k) = h["authorization"].strip_prefix("vapid t=").unwrap().split_once(", k=").unwrap();
+        let (t, k) = h["authorization"]
+            .strip_prefix("vapid t=")
+            .unwrap()
+            .split_once(", k=")
+            .unwrap();
         assert_eq!(k, public);
         use jwt_simple::prelude::*;
-        let pk = ES256PublicKey::from_bytes(&ct_codecs::Base64UrlSafeNoPadding::decode_to_vec(k, None).unwrap()).unwrap();
+        let pk = ES256PublicKey::from_bytes(
+            &ct_codecs::Base64UrlSafeNoPadding::decode_to_vec(k, None).unwrap(),
+        )
+        .unwrap();
         let claims = pk.verify_token::<Value>(t, None).unwrap();
-        assert_eq!(claims.audiences.unwrap().into_string().unwrap(), "https://web.push.apple.com");
-        assert_eq!(claims.subject.as_deref(), Some("https://desk.example.ts.net"));
+        assert_eq!(
+            claims.audiences.unwrap().into_string().unwrap(),
+            "https://web.push.apple.com"
+        );
+        assert_eq!(
+            claims.subject.as_deref(),
+            Some("https://desk.example.ts.net")
+        );
     }
 
     #[test]
     fn device_names() {
-        assert_eq!(device_name("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X)"), "iPhone");
-        assert_eq!(device_name("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"), "Mac");
+        assert_eq!(
+            device_name("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X)"),
+            "iPhone"
+        );
+        assert_eq!(
+            device_name("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"),
+            "Mac"
+        );
         assert_eq!(device_name(""), "browser");
     }
 }
@@ -1140,9 +1472,24 @@ async fn activity_login(State(s): S, headers: HeaderMap, Json(l): Json<Login>) -
         sessions.retain(|_, until| *until > Instant::now());
         sessions.insert(token.clone(), Instant::now() + SESSION_FOR);
     }
-    s.record(Entry::new("signed_in").detail(format!("activity, {} passkey {}", device_name(user_agent(&headers)), short(&by)))).await;
-    let cookie = format!("{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={}", SESSION_FOR.as_secs());
-    ([(header::SET_COOKIE, cookie), (header::CACHE_CONTROL, "no-store".into())], StatusCode::OK).into_response()
+    s.record(Entry::new("signed_in").detail(format!(
+        "activity, {} passkey {}",
+        device_name(user_agent(&headers)),
+        short(&by)
+    )))
+    .await;
+    let cookie = format!(
+        "{COOKIE}={token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age={}",
+        SESSION_FOR.as_secs()
+    );
+    (
+        [
+            (header::SET_COOKIE, cookie),
+            (header::CACHE_CONTROL, "no-store".into()),
+        ],
+        StatusCode::OK,
+    )
+        .into_response()
 }
 
 async fn signed_in(s: &App, headers: &HeaderMap) -> bool {
@@ -1151,9 +1498,18 @@ async fn signed_in(s: &App, headers: &HeaderMap) -> bool {
         .iter()
         .filter_map(|v| v.to_str().ok())
         .flat_map(|v| v.split(';'))
-        .find_map(|c| c.trim().strip_prefix(COOKIE).and_then(|r| r.strip_prefix('=')).map(str::to_string));
+        .find_map(|c| {
+            c.trim()
+                .strip_prefix(COOKIE)
+                .and_then(|r| r.strip_prefix('='))
+                .map(str::to_string)
+        });
     let Some(token) = token else { return false };
-    s.sessions.lock().await.get(&token).is_some_and(|until| *until > Instant::now())
+    s.sessions
+        .lock()
+        .await
+        .get(&token)
+        .is_some_and(|until| *until > Instant::now())
 }
 
 /// Requests waiting now, then the log, newest first.
@@ -1174,7 +1530,15 @@ async fn activity_data(State(s): S, headers: HeaderMap) -> Response {
         })
         .collect();
     waiting.sort_by_key(|(left, _)| *left);
-    let entries: Vec<Entry> = s.activity.lock().await.iter().rev().take(300).cloned().collect();
+    let entries: Vec<Entry> = s
+        .activity
+        .lock()
+        .await
+        .iter()
+        .rev()
+        .take(300)
+        .cloned()
+        .collect();
     let body = json!({
         "host": s.host,
         "now": now_secs(),

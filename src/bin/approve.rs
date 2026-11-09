@@ -1,4 +1,4 @@
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
@@ -18,7 +18,13 @@ fn parent_cmdline() -> String {
         ProcessRefreshKind::nothing().with_cmd(UpdateKind::Always),
     );
     sys.process(ppid)
-        .map(|p| p.cmd().iter().map(|s| s.to_string_lossy()).collect::<Vec<_>>().join(" "))
+        .map(|p| {
+            p.cmd()
+                .iter()
+                .map(|s| s.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown command".into())
 }
@@ -60,9 +66,16 @@ fn pam(user: String) -> ! {
 
     // pam_exec gives us /dev/null for stdin, so talk to the terminal directly.
     // No terminal (a GUI askpass, say) just means waiting without the hint.
-    let mut tty: Option<File> = OpenOptions::new().read(true).write(true).open("/dev/tty").ok();
+    let mut tty: Option<File> = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok();
     if let Some(t) = tty.as_mut() {
-        let _ = writeln!(t, "Approve on your phone, or press Enter to type your password.");
+        let _ = writeln!(
+            t,
+            "Approve on your phone, or press Enter to type your password."
+        );
         if let Ok(r) = t.try_clone() {
             std::thread::spawn(move || {
                 let _ = BufReader::new(r).read_line(&mut String::new());
@@ -81,7 +94,11 @@ fn pam(user: String) -> ! {
             Err(_) => writeln!(t, "Phone approval failed."),
         };
     }
-    std::process::exit(if matches!(answer, Ok(Answer::Approved)) { 0 } else { 1 });
+    std::process::exit(if matches!(answer, Ok(Answer::Approved)) {
+        0
+    } else {
+        1
+    });
 }
 
 /// What the phone shows for a Claude Code tool call: the command itself for
@@ -92,7 +109,9 @@ fn describe(v: &Value) -> String {
     let field = |k: &str| input[k].as_str().map(str::to_string);
     let what = match tool {
         "Bash" => field("command"),
-        "Edit" | "MultiEdit" | "Write" | "Read" => field("file_path").map(|f| format!("{tool} {f}")),
+        "Edit" | "MultiEdit" | "Write" | "Read" => {
+            field("file_path").map(|f| format!("{tool} {f}"))
+        }
         "NotebookEdit" => field("notebook_path").map(|f| format!("{tool} {f}")),
         "WebFetch" => field("url").map(|u| format!("{tool} {u}")),
         "WebSearch" => field("query").map(|q| format!("{tool} {q}")),
@@ -137,7 +156,10 @@ fn hook(only_if: Option<String>) {
     let mut s = String::new();
     std::io::stdin().read_to_string(&mut s).ok();
     let v: Value = serde_json::from_str(&s).unwrap_or_default();
-    let event = v["hook_event_name"].as_str().unwrap_or("PermissionRequest").to_string();
+    let event = v["hook_event_name"]
+        .as_str()
+        .unwrap_or("PermissionRequest")
+        .to_string();
 
     let answer = ask(&json!({
         "user": std::env::var("USER").unwrap_or_default(),
@@ -171,11 +193,18 @@ fn main() {
         pam(user);
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
-    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
         [] => hook(None),
         ["--only-if", cmd] => hook(Some(cmd.to_string())),
         _ => {
-            eprintln!("usage: approve [--only-if <shell command>]   (Claude Code hook; JSON on stdin)\n       run from pam_exec for sudo");
+            eprintln!(
+                "usage: approve [--only-if <shell command>]   (Claude Code hook; JSON on stdin)\n       run from pam_exec for sudo"
+            );
             std::process::exit(2);
         }
     }
