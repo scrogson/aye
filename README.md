@@ -1,4 +1,6 @@
-# aye
+<p align="center"><img src="assets/icon-rounded.png" width="128" height="128" alt="The Aye icon: &quot;aye!&quot; in white script with a blue exclamation mark"></p>
+
+# Aye
 
 Approve `sudo` (and Claude Code's permission prompts) from your phone, with a
 passkey and Face ID, over your Tailscale network.
@@ -12,10 +14,17 @@ falls back to your password, and Claude Code shows its own prompt.
 
 ```
 sudo / Claude Code ──► aye ──► ayed (127.0.0.1:7070) ──► Web Push ──► phone
-                                        ▲                                       │
-                                        └────── signed answer (Face ID) ◄───────┘
-                                   pages on https://<machine>.<tailnet>.ts.net
+                                 ▲                                      │
+                                 └────── signed answer (Face ID) ◄──────┘
+                               pages on https://<machine>.<tailnet>.ts.net
 ```
+
+<p align="center">
+  <img src="docs/approve-sudo.png" width="250" alt="A sudo request waiting for an answer: the command, who asked, a timer, and Deny and Approve buttons">
+  <img src="docs/approve-claude.png" width="250" alt="A Claude Code request in dark mode, showing the folder and the git command it wants to run">
+  <img src="docs/activity.png" width="250" alt="The Activity tab: approved, denied and unanswered requests by day, plus a passkey and a device being added">
+</p>
+<p align="center"><sub>A sudo request, a Claude Code request (dark mode), and the Activity tab. Sample data.</sub></p>
 
 Nothing to install on the phone: the app is the pages ayed serves, added
 to the Home Screen. It has three tabs:
@@ -40,7 +49,8 @@ to the Home Screen. It has three tabs:
 | `deploy/claude-hook.sh` | Adds the Claude Code hook to `~/.claude/settings.json` (`install`, `remove`) |
 | `deploy/macos/` | The same for a Mac: `setup.sh` (launchd), `pam.sh` (`sudo_local`) |
 | `pam/pam_aye.c` | The PAM module that runs `aye` on macOS, which has no `pam_exec` |
-| `assets/icon.svg` | The app icon; `src/bin/icon-*.png` and `assets/icon-1024.png` are made from it |
+| `assets/icon.svg` | The app icon; the PNGs in `assets/` and `src/bin/icon-*.png` are made from it |
+| `docs/` | The screenshots in this README |
 
 ## Setup
 
@@ -276,4 +286,6 @@ changing it, make the PNGs with:
 ```bash
 rsvg-convert -w 1024 -h 1024 assets/icon.svg -o assets/icon-1024.png
 for n in 180 192 512; do rsvg-convert -w $n -h $n assets/icon.svg -o src/bin/icon-$n.png; done
+magick assets/icon-1024.png -alpha set -resize 256x256 \( -size 256x256 xc:none -draw "roundrectangle 0,0,255,255,57,57" \) \
+  -compose DstIn -composite assets/icon-rounded.png   # the README's copy
 ```
