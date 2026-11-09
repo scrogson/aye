@@ -1,4 +1,4 @@
-/* Shared by approve.html and register.html. Ink and paper, one amber signal
+/* Shared by approve.html and register.html. Ink and paper, one blue signal
    for "waiting on you". System fonts only: the pages load nothing from other hosts. */
 :root {
   --surface: #ffffff;
@@ -6,8 +6,8 @@
   --muted: #5a6670;
   --line: #d9dedd;
   --code: #f3f5f3;
-  --accent: #b86200;
-  --accent-soft: #fbefdf;
+  --accent: #2563c9;
+  --accent-soft: #e6efff;
   --ok: #1e7a4c;
   --ok-soft: #e3f3ea;
   --bad: #b1232e;
@@ -21,7 +21,7 @@
 @media (prefers-color-scheme: dark) {
   :root {
     --surface: #151c23; --ink: #e6ecef; --muted: #93a0aa; --line: #26313a; --code: #0f151b;
-    --accent: #f0a23a; --accent-soft: #33260f; --ok: #4cc38a; --ok-soft: #12291e;
+    --accent: #5ea8ff; --accent-soft: #122640; --ok: #4cc38a; --ok-soft: #12291e;
     --bad: #f17b84; --bad-soft: #321619; --on-ink: #0c1116;
   }
 }
