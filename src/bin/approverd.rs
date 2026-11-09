@@ -719,20 +719,22 @@ fn with_tabs(html: &str, active: &str) -> String {
     )
 }
 
-/// On iOS, a Home Screen app can lay fixed elements out in a viewport that
-/// stops short of the bottom of the screen (by the status bar's height),
-/// leaving the tab bar floating with blank space under it. Measure how far
-/// short it stops and let the CSS move the bar down by that much.
+/// On iOS, a Home Screen app can be given a viewport that stops a status
+/// bar's height short of the bottom of the screen, and fixed elements are
+/// clipped to it, so the tab bar floats with a blank band under it. Detect that
+/// and mark the page `vp-short`; ui.css then lays it out as a full-screen column
+/// with the tab bar as its last row (seen on an iPhone 15 Pro, iOS 27.3: the
+/// viewport is 793pt of an 852pt screen, but 100lvh is still 852).
 const VIEWPORT_FIX: &str = r#"(()=>{
 if(navigator.standalone!==true)return; // iOS Home Screen apps only
 const p=document.createElement("div");
-p.style.cssText="position:fixed;left:0;bottom:0;width:0;height:0;visibility:hidden";
+p.style.cssText="position:fixed;left:0;bottom:0;width:0;height:0;visibility:hidden;pointer-events:none";
 document.body.append(p);
 const fit=()=>{
   const land=innerWidth>innerHeight;
   const screenH=land?Math.min(screen.width,screen.height):Math.max(screen.width,screen.height);
   const gap=Math.round(screenH-p.getBoundingClientRect().bottom);
-  document.documentElement.style.setProperty("--vp-gap",(gap>0&&gap<120?gap:0)+"px");
+  document.documentElement.classList.toggle("vp-short",gap>0&&gap<120);
 };
 fit();addEventListener("resize",fit);addEventListener("orientationchange",()=>setTimeout(fit,300));
 })();"#;

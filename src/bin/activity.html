@@ -183,9 +183,10 @@ function showData(d) {
     }
     list.append(entryItem(e));
   }
-  const y = scrollY;
+  const y = scrollY, inner = app.scrollTop; // the page scrolls, or <main> does (see vp-short in ui.css)
   render(parts);
   scrollTo(0, y);
+  app.scrollTop = inner;
 }
 
 async function refresh() {
