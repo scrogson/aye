@@ -27,7 +27,7 @@ use webauthn_rs::prelude::*;
 
 /// How long a request waits for an answer before it counts as a deny.
 const TIMEOUT: Duration = Duration::from_secs(60);
-/// How long `approverd register open` keeps registration open by default.
+/// How long `aye register open` keeps registration open by default.
 const REGISTER_FOR: Duration = Duration::from_secs(10 * 60);
 /// How long a Face ID sign-in to the Activity tab lasts.
 const SESSION_FOR: Duration = Duration::from_secs(15 * 60);
@@ -36,20 +36,20 @@ const KEEP: usize = 1000;
 
 const USAGE: &str = "\
 usage:
-  approverd                          run the daemon
-  approverd status                   show address, passkeys and registration
-  approverd register open [--for 10m]
-                                     let devices add a passkey (closes itself)
-  approverd register close
-  approverd passkeys                 list registered passkeys
-  approverd passkeys remove <id>     remove one (an id prefix is enough)
-  approverd push                     list devices that get notifications
-  approverd push test                send a test notification to each
-  approverd push remove <n>          stop notifying one (number from the list)
-  approverd log [n]                  the last n activity entries (default 20)
+  ayed                        run the daemon
+  aye status                  show address, passkeys and registration
+  aye register open [--for 10m]
+                              let devices add a passkey (closes itself)
+  aye register close
+  aye passkeys                list registered passkeys
+  aye passkeys remove <id>    remove one (an id prefix is enough)
+  aye push                    list devices that get notifications
+  aye push test               send a test notification to each
+  aye push remove <n>         stop notifying one (number from the list)
+  aye log [n]                 the last n activity entries (default 20)
 
 The commands talk to the running daemon over its control socket, which only
-root can open: run them with sudo.";
+root can open: run them with sudo. `ayed <command>` works the same.";
 
 struct Pending {
     user: String,
@@ -104,7 +104,7 @@ struct PushSub {
     endpoint: String,
     p256dh: String,
     auth: String,
-    /// "iPhone", "Mac", ... from its user agent, for `approverd push`.
+    /// "iPhone", "Mac", ... from its user agent, for `aye push`.
     device: String,
     /// Unix seconds.
     added: u64,
@@ -151,7 +151,7 @@ impl App {
             .mode(0o600)
             .open(&self.activity_file);
         if let Err(e) = file.and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes())) {
-            eprintln!("approverd: can't write {}: {e}", self.activity_file);
+            eprintln!("ayed: can't write {}: {e}", self.activity_file);
         }
         let mut log = self.activity.lock().await;
         log.push_back(e);
@@ -190,14 +190,14 @@ fn env(key: &str) -> String {
 }
 
 /// Where passkeys, push subscriptions, the VAPID key and the activity log
-/// live: the state directory systemd makes on Linux, /var/db/approver on macOS
+/// live: the state directory systemd makes on Linux, /var/db/aye on macOS
 /// (made by deploy/macos/setup.sh).
 fn state_dir() -> String {
     std::env::var("STATE_DIRECTORY").unwrap_or_else(|_| {
         if cfg!(target_os = "macos") {
-            "/var/db/approver"
+            "/var/db/aye"
         } else {
-            "/var/lib/approver"
+            "/var/lib/aye"
         }
         .into()
     })
@@ -207,12 +207,12 @@ fn state_dir() -> String {
 /// on Linux, and in the state directory on macOS (launchd makes no runtime
 /// directory, and /var/run is emptied at boot).
 fn socket_path() -> String {
-    std::env::var("APPROVER_SOCKET").unwrap_or_else(|_| {
+    std::env::var("AYE_SOCKET").unwrap_or_else(|_| {
         let dir = std::env::var("RUNTIME_DIRECTORY").unwrap_or_else(|_| {
             if cfg!(target_os = "macos") {
                 state_dir()
             } else {
-                "/run/approver".into()
+                "/run/aye".into()
             }
         });
         format!("{dir}/control.sock")
@@ -221,9 +221,9 @@ fn socket_path() -> String {
 
 /// How to check on the service, for error messages.
 const SERVICE_STATUS: &str = if cfg!(target_os = "macos") {
-    "sudo launchctl print system/local.approverd"
+    "sudo launchctl print system/local.ayed"
 } else {
-    "systemctl status approverd"
+    "systemctl status ayed"
 };
 
 #[tokio::main]
@@ -250,11 +250,11 @@ async fn main() {
         ["log"] => json!({ "cmd": "log", "n": 20 }),
         ["log", n] => match n.parse::<u64>() {
             Ok(n) => json!({ "cmd": "log", "n": n }),
-            Err(_) => exit_usage("give a number of entries, e.g. approverd log 50"),
+            Err(_) => exit_usage("give a number of entries, e.g. aye log 50"),
         },
         ["push", "remove", n] => match n.parse::<u64>() {
             Ok(n) => json!({ "cmd": "push_remove", "n": n }),
-            Err(_) => exit_usage("give the device's number from: approverd push"),
+            Err(_) => exit_usage("give the device's number from: aye push"),
         },
         ["-h" | "--help" | "help"] => {
             println!("{USAGE}");
@@ -266,7 +266,7 @@ async fn main() {
 }
 
 fn exit_usage(why: &str) -> ! {
-    eprintln!("approverd: {why}\n\n{USAGE}");
+    eprintln!("ayed: {why}\n\n{USAGE}");
     std::process::exit(2);
 }
 
@@ -306,12 +306,12 @@ async fn control_client(cmd: Value) -> i32 {
     let mut stream = match connected {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            eprintln!("approverd: permission denied on {path}; run this with sudo");
+            eprintln!("ayed: permission denied on {path}; run this with sudo");
             return 1;
         }
         Err(e) => {
             eprintln!(
-                "approverd: can't reach the daemon at {path}: {e}\nIs it running? {SERVICE_STATUS}"
+                "ayed: can't reach the daemon at {path}: {e}\nIs it running? {SERVICE_STATUS}"
             );
             return 1;
         }
@@ -321,7 +321,7 @@ async fn control_client(cmd: Value) -> i32 {
         .await
         .is_err()
     {
-        eprintln!("approverd: the daemon closed the connection");
+        eprintln!("ayed: the daemon closed the connection");
         return 1;
     }
     let mut line = String::new();
@@ -333,7 +333,7 @@ async fn control_client(cmd: Value) -> i32 {
         println!("{text}");
         0
     } else {
-        eprintln!("approverd: {text}");
+        eprintln!("ayed: {text}");
         1
     }
 }
@@ -341,11 +341,11 @@ async fn control_client(cmd: Value) -> i32 {
 async fn serve() {
     // This machine's Tailscale name, e.g. desk.tailnet-name.ts.net. It is both the
     // WebAuthn relying party id and the origin the approval pages are served on.
-    let rp_id = env("APPROVER_HOST");
+    let rp_id = env("AYE_HOST");
     let origin = format!("https://{rp_id}");
     let webauthn = WebauthnBuilder::new(&rp_id, &Url::parse(&origin).unwrap())
         .unwrap()
-        .rp_name("Approver")
+        .rp_name("Aye")
         .build()
         .unwrap();
     let state_dir = state_dir();
@@ -363,7 +363,7 @@ async fn serve() {
     let activity_file = format!("{state_dir}/activity.jsonl");
     let activity = load_activity(&activity_file);
     eprintln!(
-        "approverd: {origin}, {} passkey(s), {} device(s) for notifications",
+        "ayed: {origin}, {} passkey(s), {} device(s) for notifications",
         passkeys.len(),
         subs.len()
     );
@@ -481,7 +481,7 @@ async fn control_server(s: Arc<App>, path: String) {
         tokio::spawn(async move {
             let (r, mut w) = stream.into_split();
             let reply = if uid != 0 && uid != owner {
-                json!({ "ok": false, "text": "only root can control approverd; run this with sudo" })
+                json!({ "ok": false, "text": "only root can control ayed; run this with sudo" })
             } else {
                 let mut line = String::new();
                 let _ = BufReader::new(r).read_line(&mut line).await;
@@ -506,7 +506,7 @@ fn cred_str(c: &CredentialID) -> String {
         .unwrap_or_default()
 }
 
-/// Enough of a passkey id to tell them apart (`approverd passkeys` shows it all).
+/// Enough of a passkey id to tell them apart (`aye passkeys` shows it all).
 fn short(id: &str) -> String {
     id.chars().take(8).collect()
 }
@@ -562,7 +562,7 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
             if subs.is_empty() {
                 return fail("no devices to notify".into());
             }
-            let payload = json!({ "title": "Test from approverd", "body": format!("Notifications from {} work.", s.host), "url": "/" });
+            let payload = json!({ "title": "Test from ayed", "body": format!("Notifications from {} work.", s.host), "url": "/" });
             let mut lines = Vec::new();
             for (i, sub) in subs.iter().enumerate() {
                 let r = send_push(s, sub, &payload).await;
@@ -583,7 +583,7 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
             let n = cmd["n"].as_u64().unwrap_or(0) as usize;
             let mut subs = s.subs.lock().await;
             if n == 0 || n > subs.len() {
-                return fail(format!("no device {n}; see: approverd push"));
+                return fail(format!("no device {n}; see: aye push"));
             }
             let gone = subs.remove(n - 1);
             save_subs(s, &subs);
@@ -604,14 +604,14 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                 .unwrap_or(REGISTER_FOR.as_secs())
                 .clamp(1, 24 * 3600);
             *s.register_until.lock().await = Some(Instant::now() + Duration::from_secs(secs));
-            eprintln!("approverd: registration open for {secs}s");
+            eprintln!("ayed: registration open for {secs}s");
             s.record(
                 Entry::new("registration_opened")
                     .detail(format!("for {}", mins_secs(Duration::from_secs(secs)))),
             )
             .await;
             ok(format!(
-                "Registration is open for {}. On the device, open {}/register\nIt closes by itself; to close it now: sudo approverd register close",
+                "Registration is open for {}. On the device, open {}/register\nIt closes by itself; to close it now: sudo aye register close",
                 mins_secs(Duration::from_secs(secs)),
                 s.origin
             ))
@@ -619,16 +619,14 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
         "register_close" => {
             *s.register_until.lock().await = None;
             *s.reg.lock().await = None;
-            eprintln!("approverd: registration closed");
+            eprintln!("ayed: registration closed");
             s.record(Entry::new("registration_closed")).await;
             ok("Registration is closed.".into())
         }
         "passkeys" => {
             let keys = s.passkeys.lock().await;
             if keys.is_empty() {
-                return ok(
-                    "No passkeys registered. Add one with: sudo approverd register open".into(),
-                );
+                return ok("No passkeys registered. Add one with: sudo aye register open".into());
             }
             let lines: Vec<String> = keys
                 .iter()
@@ -641,7 +639,7 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
             let want = cmd["id"].as_str().unwrap_or_default();
             if want.len() < 4 {
                 return fail(
-                    "give at least 4 characters of the passkey id (see: approverd passkeys)".into(),
+                    "give at least 4 characters of the passkey id (see: aye passkeys)".into(),
                 );
             }
             let mut keys = s.passkeys.lock().await;
@@ -657,7 +655,7 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                     save_passkeys(s, &keys).await;
                     let left = keys.len();
                     drop(keys);
-                    eprintln!("approverd: removed passkey {gone}");
+                    eprintln!("ayed: removed passkey {gone}");
                     s.record(Entry::new("passkey_removed").detail(short(&gone)))
                         .await;
                     ok(format!("Removed {gone}. {left} passkey(s) left."))
@@ -744,7 +742,9 @@ fn with_tabs(html: &str, active: &str) -> String {
     assert!(html.contains("<!--tabs-->"), "page is missing <!--tabs-->");
     html.replace(
         "<!--tabs-->",
-        &format!(r#"<nav class="tabs" aria-label="Approver">{links}</nav><script>{VIEWPORT_FIX}</script>"#),
+        &format!(
+            r#"<nav class="tabs" aria-label="Aye">{links}</nav><script>{VIEWPORT_FIX}</script>"#
+        ),
     )
 }
 
@@ -765,7 +765,7 @@ addEventListener("scroll",()=>{if(scrollY||scrollX)scrollTo(0,0);},{passive:true
 
 /// A page or stylesheet: never cached, never framed (so the Approve button
 /// can't be overlaid by another site), and only able to talk to this origin.
-const NOT_FOUND: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Not found</title><link rel="stylesheet" href="/ui.css"></head><body><main class="screen"><div class="body"><div class="result"><h1>Nothing here</h1><p>Approval requests open from their notification. <a href="/">Go to Approver</a>.</p></div></div></main></body></html>"#;
+const NOT_FOUND: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Not found</title><link rel="stylesheet" href="/ui.css"></head><body><main class="screen"><div class="body"><div class="result"><h1>Nothing here</h1><p>Approval requests open from their notification. <a href="/">Go to Aye</a>.</p></div></div></main></body></html>"#;
 
 fn page<B: IntoResponse>(content_type: &'static str, body: B) -> impl IntoResponse {
     (
@@ -794,7 +794,7 @@ async fn save_passkeys(s: &App, keys: &[Passkey]) {
 // ---------- local API: blocks until approved, denied, or timed out ----------
 
 /// What a caller asks to approve. Newer callers send `user`, `kind` and
-/// `command`; older ones (pam_approver) send one `summary` like
+/// `command`; older ones (pam_aye) send one `summary` like
 /// "alice@laptop: sudo brew upgrade", which is split as a fallback.
 #[derive(Deserialize)]
 struct Req {
@@ -875,7 +875,7 @@ async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
         Some((false, by)) => ("denied", format!("in {waited}s, passkey {}", short(by))),
         None => ("expired", format!("no answer in {}s", TIMEOUT.as_secs())),
     };
-    eprintln!("approverd: {id} {event}");
+    eprintln!("ayed: {id} {event}");
     if let Some(p) = p {
         s.record(Entry::new(event).request(&p).detail(detail)).await;
     }
@@ -896,7 +896,7 @@ impl Drop for Withdraw {
         let (s, id) = (self.s.clone(), self.id);
         tokio::spawn(async move {
             let p = s.pending.lock().await.remove(&id);
-            eprintln!("approverd: {id} withdrawn by the asker");
+            eprintln!("ayed: {id} withdrawn by the asker");
             if let Some(p) = p {
                 let waited = TIMEOUT
                     .saturating_sub(p.deadline.saturating_duration_since(Instant::now()))
@@ -990,7 +990,7 @@ async fn verify(State(s): S, Path(id): Path<Uuid>, Json(v): Json<Verify>) -> Sta
     StatusCode::OK
 }
 
-// ---------- registration (only while `approverd register open` is in effect) ----------
+// ---------- registration (only while `aye register open` is in effect) ----------
 
 async fn reg_status(State(s): S) -> Json<Value> {
     Json(json!({
@@ -1016,8 +1016,8 @@ async fn reg_start(State(s): S) -> Result<Json<CreationChallengeResponse>, Statu
         .webauthn
         .start_passkey_registration(
             Uuid::new_v4(),
-            "approver",
-            &format!("Approver on {}", s.host),
+            "aye",
+            &format!("Aye on {}", s.host),
             Some(exclude),
         )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1043,7 +1043,7 @@ async fn reg_finish(
     let mut keys = s.passkeys.lock().await;
     keys.push(pk);
     save_passkeys(&s, &keys).await;
-    eprintln!("approverd: registered passkey #{}", keys.len());
+    eprintln!("ayed: registered passkey #{}", keys.len());
     drop(keys);
     s.record(Entry::new("passkey_added").detail(format!(
         "{} from {}",
@@ -1083,7 +1083,7 @@ async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
     let subs = s.subs.lock().await.clone();
     if subs.is_empty() {
         eprintln!(
-            "approverd: no device gets notifications; open {}/ on the phone to turn them on",
+            "ayed: no device gets notifications; open {}/ on the phone to turn them on",
             s.origin
         );
     }
@@ -1092,7 +1092,7 @@ async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
             Ok(()) => {}
             Err((true, e)) => {
                 eprintln!(
-                    "approverd: {} stopped accepting pushes ({e}); removed",
+                    "ayed: {} stopped accepting pushes ({e}); removed",
                     sub.device
                 );
                 drop_sub(&s, &sub.endpoint).await;
@@ -1100,7 +1100,7 @@ async fn notify(s: Arc<App>, id: Uuid, what: &'static str) {
                     .await;
             }
             Err((false, e)) => {
-                eprintln!("approverd: push to {} failed: {e}", sub.device);
+                eprintln!("ayed: push to {} failed: {e}", sub.device);
                 s.record(Entry::new("push_failed").detail(format!("{}: {e}", sub.device)))
                     .await;
             }
@@ -1251,8 +1251,8 @@ fn device_name(ua: &str) -> String {
 
 async fn manifest(State(s): S) -> impl IntoResponse {
     let body = json!({
-        "name": format!("Approver ({})", s.host),
-        "short_name": "Approver",
+        "name": format!("Aye ({})", s.host),
+        "short_name": "Aye",
         "description": format!("Approve sudo and Claude Code on {} with your passkey", s.host),
         "start_url": "/",
         "scope": "/",
@@ -1372,7 +1372,7 @@ async fn push_subscribe(State(s): S, headers: HeaderMap, Json(r): Json<Subscribe
     s.record(Entry::new("device_added").detail(format!("{}, passkey {}", new.device, short(&by))))
         .await;
     eprintln!(
-        "approverd: notifications on for {} ({})",
+        "ayed: notifications on for {} ({})",
         new.device,
         endpoint_host(&new.endpoint)
     );
@@ -1395,7 +1395,7 @@ async fn push_test_one(State(s): S, Json(e): Json<Endpoint>) -> StatusCode {
     else {
         return StatusCode::NOT_FOUND;
     };
-    let payload = json!({ "title": "Test from approverd", "body": format!("Notifications from {} work.", s.host), "url": "/" });
+    let payload = json!({ "title": "Test from ayed", "body": format!("Notifications from {} work.", s.host), "url": "/" });
     match send_push(&s, &sub, &payload).await {
         Ok(()) => StatusCode::OK,
         Err((true, _)) => {
@@ -1403,7 +1403,7 @@ async fn push_test_one(State(s): S, Json(e): Json<Endpoint>) -> StatusCode {
             StatusCode::GONE
         }
         Err((false, e)) => {
-            eprintln!("approverd: test push to {} failed: {e}", sub.device);
+            eprintln!("ayed: test push to {} failed: {e}", sub.device);
             StatusCode::BAD_GATEWAY
         }
     }
@@ -1426,7 +1426,7 @@ mod tests {
             added: 0,
         };
         let (vapid, public) = {
-            let dir = std::env::temp_dir().join(format!("approverd-test-{}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("ayed-test-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let k = vapid_keys(dir.join("vapid.key").to_str().unwrap());
             std::fs::remove_dir_all(&dir).unwrap();
@@ -1484,7 +1484,7 @@ mod tests {
 
 // ---------- activity: the log, behind a Face ID sign-in ----------
 
-const COOKIE: &str = "approver_session";
+const COOKIE: &str = "aye_session";
 
 #[derive(Deserialize)]
 struct Login {

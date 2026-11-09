@@ -72,24 +72,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "approver"
-version = "0.1.0"
-dependencies = [
- "axum",
- "ct-codecs",
- "ece",
- "jwt-simple",
- "openssl",
- "reqwest",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
- "web-push",
- "webauthn-rs",
-]
-
-[[package]]
 name = "arrayvec"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -207,6 +189,24 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "aye"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "ct-codecs",
+ "ece",
+ "jwt-simple",
+ "openssl",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "web-push",
+ "webauthn-rs",
 ]
 
 [[package]]

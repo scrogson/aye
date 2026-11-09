@@ -130,7 +130,7 @@ ul.facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; fo
 ul.facts li { display: grid; grid-template-columns: 18px 1fr; gap: 10px; }
 ul.facts svg { width: 16px; height: 16px; margin-top: 3px; color: var(--muted); }
 
-/* Tab bar along the bottom of the app (put in by approverd where a page says <!--tabs-->). */
+/* Tab bar along the bottom of the app (put in by ayed where a page says <!--tabs-->). */
 /* The home indicator only needs ~20px of the 34px iOS reserves for it. */
 .tabbed { --tabs-pad: max(6px, calc(env(safe-area-inset-bottom) - 14px)); --tabs-h: calc(52px + var(--tabs-pad)); padding-bottom: var(--tabs-h); }
 .tabbed .actions { bottom: var(--tabs-h); padding-bottom: 12px; }

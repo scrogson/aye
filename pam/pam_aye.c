@@ -1,14 +1,14 @@
 /*
- * pam_approver: runs /usr/local/bin/approve for sudo, the way pam_exec does
+ * pam_aye: runs /usr/local/bin/aye for sudo, the way pam_exec does
  * on Linux. macOS has no pam_exec, so this is the piece it's missing.
  *
- *   auth  sufficient  /usr/local/lib/pam/pam_approver.so
+ *   auth  sufficient  /usr/local/lib/pam/pam_aye.so
  *
- * approve asks approverd, waits for the phone, and exits 0 only on a signed
- * approval. Anything else (a deny, no answer, Enter, approverd not running)
+ * aye asks ayed, waits for the phone, and exits 0 only on a signed
+ * approval. Anything else (a deny, no answer, Enter, ayed not running)
  * returns PAM_IGNORE, so PAM carries on to the next line: the password.
  *
- * An optional module argument replaces the program's path. approve gets a
+ * An optional module argument replaces the program's path. aye gets a
  * clean environment (PAM_USER, PAM_TYPE, PAM_SERVICE), stdin from /dev/null,
  * and sudo as its parent, so it can read the command sudo is about to run.
  */
@@ -24,9 +24,9 @@
 #include <security/pam_appl.h>
 #include <security/pam_modules.h>
 
-#define APPROVE "/usr/local/bin/approve"
+#define AYE_PATH "/usr/local/bin/aye"
 
-static int run_approve(const char *prog, const char *user, const char *service) {
+static int run_aye(const char *prog, const char *user, const char *service) {
     char env_user[512], env_service[256];
     snprintf(env_user, sizeof env_user, "PAM_USER=%s", user);
     snprintf(env_service, sizeof env_service, "PAM_SERVICE=%s", service ? service : "");
@@ -69,8 +69,8 @@ PAM_EXTERN int pam_sm_authenticate(pam_handle_t *pamh, int flags, int argc, cons
     if (pam_get_user(pamh, &user, NULL) != PAM_SUCCESS || user == NULL || *user == '\0')
         return PAM_IGNORE;
     pam_get_item(pamh, PAM_SERVICE, &service);
-    const char *prog = argc > 0 && argv[0][0] == '/' ? argv[0] : APPROVE;
-    return run_approve(prog, user, service) ? PAM_SUCCESS : PAM_IGNORE;
+    const char *prog = argc > 0 && argv[0][0] == '/' ? argv[0] : AYE_PATH;
+    return run_aye(prog, user, service) ? PAM_SUCCESS : PAM_IGNORE;
 }
 
 PAM_EXTERN int pam_sm_setcred(pam_handle_t *pamh, int flags, int argc, const char **argv) {

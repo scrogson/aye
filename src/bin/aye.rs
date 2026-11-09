@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, IsTerminal, Read, Write},
     time::Duration,
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -37,7 +37,7 @@ enum Answer {
     Unanswered,
 }
 
-/// Ask approverd and wait for a signed answer from the phone.
+/// Ask ayed and wait for a signed answer from the phone.
 fn ask(request: &Value) -> Result<Answer, reqwest::Error> {
     let v: Value = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(2))
@@ -55,7 +55,7 @@ fn ask(request: &Value) -> Result<Answer, reqwest::Error> {
     })
 }
 
-/// PAM mode, run by `auth sufficient pam_exec.so quiet /usr/local/bin/approve`.
+/// PAM mode, run by `auth sufficient pam_exec.so quiet /usr/local/bin/aye`.
 /// Exit 0 lets sudo through; anything else falls on to the next PAM line
 /// (the password), so a down daemon or a missed push only costs the wait.
 fn pam(user: String) -> ! {
@@ -188,6 +188,32 @@ fn hook(only_if: Option<String>) {
     println!("{out}");
 }
 
+const USAGE: &str = "\
+usage:
+  aye [--only-if <shell command>]   Claude Code PermissionRequest hook (JSON on stdin)
+  aye                               from pam_exec (or pam_aye on a Mac), for sudo
+  sudo aye status|register|passkeys|push|log ...
+                                    run ayed's admin commands (see: aye help)";
+
+/// Commands `aye` hands to ayed, so there's one name to type.
+const ADMIN: &[&str] = &[
+    "status", "register", "passkeys", "push", "log", "help", "-h", "--help",
+];
+
+/// Runs ayed with the same arguments: the ayed next to this program, else
+/// /usr/local/bin/ayed. Only returns if it can't be started.
+fn admin(args: &[String]) -> ! {
+    use std::os::unix::process::CommandExt;
+    let beside = std::env::current_exe()
+        .ok()
+        .and_then(|p| Some(p.parent()?.join("ayed")))
+        .filter(|p| p.is_file());
+    let ayed = beside.unwrap_or_else(|| "/usr/local/bin/ayed".into());
+    let err = std::process::Command::new(&ayed).args(args).exec();
+    eprintln!("aye: can't run {}: {err}", ayed.display());
+    std::process::exit(1);
+}
+
 fn main() {
     if let Ok(user) = std::env::var("PAM_USER") {
         pam(user);
@@ -199,12 +225,11 @@ fn main() {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [] => hook(None),
+        [] if !std::io::stdin().is_terminal() => hook(None),
         ["--only-if", cmd] => hook(Some(cmd.to_string())),
+        [first, ..] if ADMIN.contains(first) => admin(&args),
         _ => {
-            eprintln!(
-                "usage: approve [--only-if <shell command>]   (Claude Code hook; JSON on stdin)\n       run from pam_exec for sudo"
-            );
+            eprintln!("{USAGE}");
             std::process::exit(2);
         }
     }

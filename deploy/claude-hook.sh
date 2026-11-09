@@ -16,29 +16,29 @@
 set -euo pipefail
 
 SETTINGS=~/.claude/settings.json
-APPROVE=/usr/local/bin/approve
+AYE=/usr/local/bin/aye
 command -v jq >/dev/null || { echo "needs jq"; exit 1; }
 [[ -f $SETTINGS ]] || echo '{}' > "$SETTINGS"
 
-# Every hook group that runs approve, removed (empty lists dropped too).
+# Every hook group that runs aye, removed (empty lists dropped too).
 WITHOUT='
   if .hooks.PermissionRequest then
-    .hooks.PermissionRequest |= map(select(any(.hooks[]?; (.command // "") | startswith($approve)) | not))
+    .hooks.PermissionRequest |= map(select(any(.hooks[]?; (.command // "") | startswith($aye)) | not))
     | if .hooks.PermissionRequest == [] then del(.hooks.PermissionRequest) else . end
     | if .hooks == {} then del(.hooks) else . end
   else . end'
 
 write() {
   local new; new=$(mktemp)
-  jq --arg approve "$APPROVE" "$@" "$SETTINGS" > "$new"
-  [[ -e $SETTINGS.approver-backup ]] || cp -p "$SETTINGS" "$SETTINGS.approver-backup"
+  jq --arg aye "$AYE" "$@" "$SETTINGS" > "$new"
+  [[ -e $SETTINGS.aye-backup ]] || cp -p "$SETTINGS" "$SETTINGS.aye-backup"
   cat "$new" > "$SETTINGS"; rm -f "$new"
 }
 
 case "${1:-}" in
   install)
-    [[ -x $APPROVE ]] || { echo "install approve first (deploy/pam.sh, or deploy/macos/pam.sh on a Mac, puts it in $APPROVE)"; exit 1; }
-    cmd=$APPROVE
+    [[ -x $AYE ]] || { echo "install aye first (deploy/pam.sh, or deploy/macos/pam.sh on a Mac, puts it in $AYE)"; exit 1; }
+    cmd=$AYE
     if [[ ${ALWAYS:-} == 1 ]]; then
       echo "Pushing every permission prompt to the phone."
     else
@@ -48,7 +48,7 @@ case "${1:-}" in
       [[ $(uname) == Darwin ]] && default=$mac_lock || default=$(command -v omarchy-hyprland-session-locked || true)
       only_if=${ONLY_IF:-$default}
       [[ -n $only_if ]] || { echo "no lock check found: set ONLY_IF='<command that exits 0 when locked>' or ALWAYS=1"; exit 1; }
-      cmd="$APPROVE --only-if $(printf '%q' "$only_if")"
+      cmd="$AYE --only-if $(printf '%q' "$only_if")"
       echo "Pushing permission prompts to the phone while this is true: $only_if"
     fi
     write --arg cmd "$cmd" "$WITHOUT"' | .hooks.PermissionRequest += [{

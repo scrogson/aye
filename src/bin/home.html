@@ -6,8 +6,8 @@
 <meta name="color-scheme" content="light dark">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Approver">
-<title>Approver</title>
+<meta name="apple-mobile-web-app-title" content="Aye">
+<title>Aye</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" href="/icon-180.png">
 <link rel="icon" href="/icon-192.png">
@@ -105,12 +105,12 @@ function showInstall() {
   render([
     logo(),
     h("span", { class: "chip" }, h("span", { class: "dot" }), "One-time setup"),
-    h("h1", null, "Add Approver to your Home Screen"),
+    h("h1", null, "Add Aye to your Home Screen"),
     h("p", { class: "lede" }, "iPhone only sends notifications to web apps on the Home Screen. Then approval requests arrive like any other app's."),
     h("ul", { class: "facts" },
       h("li", null, icon("i-share"), h("span", null, "Tap the Share button in Safari's toolbar.")),
       h("li", null, icon("i-plus"), h("span", null, "Choose Add to Home Screen, then Add.")),
-      h("li", null, icon("i-bell"), h("span", null, "Open Approver from the Home Screen and turn on notifications."))),
+      h("li", null, icon("i-bell"), h("span", null, "Open Aye from the Home Screen and turn on notifications."))),
   ]);
 }
 
@@ -122,13 +122,13 @@ function showUnsupported() {
 function showNoPasskey() {
   render(result("idle", "i-key", `Add a passkey to ${info.host} first`,
     "Turning on notifications is confirmed with your passkey, so this device needs one.",
-    h("div", { class: "cmd small" }, "sudo approverd register open")),
+    h("div", { class: "cmd small" }, "sudo aye register open")),
     h("div", { class: "actions one" }, button("Add a passkey", "i-key", () => location.href = "/register")));
 }
 
 function showBlocked() {
   render(result("bad", "i-alert", "Notifications are turned off",
-    isIOS ? "Turn them on in Settings › Notifications › Approver, then come back here."
+    isIOS ? "Turn them on in Settings › Notifications › Aye, then come back here."
           : "Allow notifications for this site in the browser's settings, then reload."),
     h("div", { class: "actions one" }, button("Check again", null, () => location.reload())));
 }
@@ -202,7 +202,7 @@ async function turnOn() {
   else showConfirm();
 }
 
-// Tap 2: Face ID, then hand the subscription to approverd.
+// Tap 2: Face ID, then hand the subscription to ayed.
 async function confirm_() {
   if (busy || !login) return;
   busy = true;
@@ -244,7 +244,7 @@ async function sendTest() {
   busy = false;
   if (r.ok) return showOn({ text: "Sent. It should arrive in a few seconds." });
   if (r.status === 404 || r.status === 410) return showOff("This device was removed. Turn notifications on again.");
-  showOn({ bad: true, text: `The test didn't send (${r.status || "no connection"}). Check: sudo approverd status` });
+  showOn({ bad: true, text: `The test didn't send (${r.status || "no connection"}). Check: sudo aye status` });
 }
 
 // ---------- start ----------

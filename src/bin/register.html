@@ -63,8 +63,8 @@ function result(tone, ic, title, text, code) {
 function showClosed() {
   const n = status.passkeys;
   result("idle", "i-closed", n ? `${plural(n)} on ${status.host}` : `No passkeys on ${status.host} yet`,
-    `To add one, open registration from a terminal on ${status.host}, then reload this page. To see or remove them: sudo approverd passkeys.`,
-    "sudo approverd register open");
+    `To add one, open registration from a terminal on ${status.host}, then reload this page. To see or remove them: sudo aye passkeys.`,
+    "sudo aye register open");
 }
 
 function showOpen(error) {
@@ -119,7 +119,7 @@ async function add_() {
   if (r.ok) {
     return result("ok", "i-check", "Passkey added",
       `${status.host} now has ${plural(status.passkeys + 1)}. Registration closes by itself in a few minutes, or close it now on ${status.host}:`,
-      "sudo approverd register close");
+      "sudo aye register close");
   }
   if (r.status === 403) { status.open = false; return showClosed(); }
   options = null;

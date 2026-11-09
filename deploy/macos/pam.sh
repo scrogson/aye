@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # Adds phone approval to sudo on this Mac, the macOS version of deploy/pam.sh.
-# macOS has no pam_exec, so pam/pam_approver.c (built here) runs approve in
+# macOS has no pam_exec, so pam/pam_aye.c (built here) runs aye in
 # its place. The line goes in /etc/pam.d/sudo_local, the file macOS keeps for
 # local additions across updates, after Touch ID if that's on:
 #
 #   auth  sufficient  pam_tid.so                           (unchanged, if there)
-#   auth  sufficient  /usr/local/lib/pam/pam_approver.so   (added)
+#   auth  sufficient  /usr/local/lib/pam/pam_aye.so   (added)
 #
 # then /etc/pam.d/sudo carries on to your password. At the Mac you use Touch
 # ID as before; where Touch ID can't work (over SSH, lid closed) a push goes
-# to the phone. Enter, a deny, a timeout or a stopped approverd all fall
+# to the phone. Enter, a deny, a timeout or a stopped ayed all fall
 # through to the password. /etc/pam.d/sudo itself isn't touched.
 #
 #   deploy/macos/pam.sh test      try it on a throwaway PAM service first
@@ -21,10 +21,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-MODULE=/usr/local/lib/pam/pam_approver.so
+MODULE=/usr/local/lib/pam/pam_aye.so
 LINE="auth       sufficient     $MODULE"
 LOCAL=/etc/pam.d/sudo_local
-BACKUP=/etc/pam.d/sudo_local.approver-backup
+BACKUP=/etc/pam.d/sudo_local.aye-backup
 
 [[ $(uname) == Darwin ]] || { echo "this is the macOS version; on Linux use deploy/pam.sh"; exit 1; }
 [[ $EUID -ne 0 ]] || { echo "run as your user, not root"; exit 1; }
@@ -45,13 +45,13 @@ with_line() {
 }
 
 install_parts() {
-  [[ -x target/release/approve ]] || { echo "build first: cargo build --release"; exit 1; }
-  sudo approverd status >/dev/null 2>&1 || { echo "approverd isn't running; set it up first (deploy/macos/setup.sh)"; exit 1; }
+  [[ -x target/release/aye ]] || { echo "build first: cargo build --release"; exit 1; }
+  sudo ayed status >/dev/null 2>&1 || { echo "ayed isn't running; set it up first (deploy/macos/setup.sh)"; exit 1; }
   grep -q '^auth.*include.*sudo_local' /etc/pam.d/sudo || { echo "/etc/pam.d/sudo doesn't include sudo_local (macOS 14 or later needed)"; exit 1; }
-  cc -bundle -Wall -Wextra -Werror -o target/release/pam_approver.so pam/pam_approver.c -lpam
+  cc -bundle -Wall -Wextra -Werror -o target/release/pam_aye.so pam/pam_aye.c -lpam
   sudo install -d -m755 -o root -g wheel /usr/local/bin /usr/local/lib/pam
-  sudo install -m755 -o root -g wheel target/release/approve /usr/local/bin/approve
-  sudo install -m444 -o root -g wheel target/release/pam_approver.so "$MODULE"
+  sudo install -m755 -o root -g wheel target/release/aye /usr/local/bin/aye
+  sudo install -m444 -o root -g wheel target/release/pam_aye.so "$MODULE"
 }
 
 case "${1:-}" in
@@ -64,13 +64,13 @@ case "${1:-}" in
       with_line | grep '^auth'
       grep '^auth' /etc/pam.d/sudo | grep -v sudo_local
     } > "$tmp"
-    sudo install -m644 -o root -g wheel "$tmp" /etc/pam.d/approver-test
-    echo "Trying /etc/pam.d/approver-test (your real sudo is untouched):"
-    sed 's/^/    /' /etc/pam.d/approver-test
+    sudo install -m644 -o root -g wheel "$tmp" /etc/pam.d/aye-test
+    echo "Trying /etc/pam.d/aye-test (your real sudo is untouched):"
+    sed 's/^/    /' /etc/pam.d/aye-test
     echo
-    if target/release/pamtest approver-test; then echo "=> would have let sudo through"; else echo "=> would have refused"; fi
+    if target/release/pamtest aye-test; then echo "=> would have let sudo through"; else echo "=> would have refused"; fi
     echo "Run it again to try the other ways in: Touch ID, approve, deny, Enter, wrong password."
-    echo "Clean up when done: sudo rm /etc/pam.d/approver-test"
+    echo "Clean up when done: sudo rm /etc/pam.d/aye-test"
     ;;
   install)
     if [[ -f $LOCAL ]] && grep -qF "$MODULE" "$LOCAL"; then echo "already installed"; exit 0; fi
@@ -90,7 +90,7 @@ case "${1:-}" in
     echo "Keep this terminal open. In a NEW terminal, try:  sudo -k; sudo true"
     echo "If sudo is broken there, this takes the line out again without sudo (it asks for"
     echo "your password in a macOS dialog, which doesn't go through sudo's PAM stack):"
-    echo "  osascript -e 'do shell script \"/usr/bin/sed -i .bak /pam_approver/d $LOCAL\" with administrator privileges'"
+    echo "  osascript -e 'do shell script \"/usr/bin/sed -i .bak /pam_aye/d $LOCAL\" with administrator privileges'"
     ;;
   remove)
     if ! [[ -f $LOCAL ]] || ! grep -qF "$MODULE" "$LOCAL"; then echo "not installed"; exit 0; fi

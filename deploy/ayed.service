@@ -4,18 +4,18 @@ Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/approverd
-# APPROVER_HOST (root-only file)
-EnvironmentFile=/etc/approver/approverd.env
+ExecStart=/usr/local/bin/ayed
+# AYE_HOST (root-only file)
+EnvironmentFile=/etc/aye/ayed.env
 Restart=on-failure
 
 # Its own throwaway user; passkeys.json, push.json and vapid.key live in
-# /var/lib/private/approver, readable only by that user.
+# /var/lib/private/aye, readable only by that user.
 DynamicUser=yes
-StateDirectory=approver
+StateDirectory=aye
 StateDirectoryMode=0700
-# control.sock for `sudo approverd ...`
-RuntimeDirectory=approver
+# control.sock for `sudo ayed ...`
+RuntimeDirectory=aye
 RuntimeDirectoryMode=0700
 UMask=0077
 

@@ -1,4 +1,4 @@
-// Service worker for the home-screen app: shows approverd's pushes and opens
+// Service worker for the home-screen app: shows ayed's pushes and opens
 // the approval page when one is tapped. Pushes carry only a title, a line of
 // text and a link on this machine; the command itself is never in them.
 
