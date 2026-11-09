@@ -141,12 +141,89 @@ timeout, Enter, or a stopped ayed all lead to the password prompt.
    deploy/pam.sh install
    ```
 
-To take it out: `deploy/pam.sh remove`. If sudo itself ever breaks, polkit is
-untouched, so this restores the old file:
+To take it out: `deploy/pam.sh remove`. If sudo itself ever breaks, see
+[If sudo stops working](#if-sudo-stops-working).
 
-```bash
-pkexec cp /etc/pam.d/sudo.aye-backup /etc/pam.d/sudo
-```
+## Changing PAM safely
+
+A mistake in PAM can't damage the machine, but it can take away your ways to
+become root until you fix a file. On a machine in front of you that's an
+annoyance; on one you reach only over SSH it can mean a trip to the console.
+The scripts here avoid the usual mistakes. If you edit PAM files by hand,
+keep these in mind:
+
+- **Edit only sudo's part.** On Linux that's `/etc/pam.d/sudo`, not
+  `system-auth` (Arch) or `common-auth` (Debian and Ubuntu), which login, the
+  screen locker, `su` and polkit share with sudo: a mistake there breaks all
+  of them at once, including the ways you'd use to fix it. On a Mac it's
+  `/etc/pam.d/sudo_local`: macOS updates replace `/etc/pam.d/sudo`, and the
+  other files in `/etc/pam.d` are for login, the screen lock and so on.
+- **Use `sufficient` for anything that can be missing, never `required`.** A
+  `sufficient` line that succeeds lets you in; one that fails, crashes or
+  can't be found is skipped and the next line runs, so it can only add a way
+  in. `required` or `requisite` on a phone, a daemon or a key that isn't
+  plugged in means no sudo whenever it's unavailable. On a Mac this goes for
+  every line in `sudo_local`, because it's read before the password.
+- **Leave the password where it is.** It's the way in when everything before
+  it says no: the last `auth` line (or `include system-auth`) on Linux, and
+  `pam_opendirectory` in `/etc/pam.d/sudo` on a Mac.
+- **Nothing on the way may hang.** Lines after it never run. `aye` gives up
+  after 60 seconds, and Enter skips it.
+- **Keep what PAM runs owned by root and not writable by you.** `pam_exec`
+  lets sudo through when the program exits 0, so if your user could replace
+  `/usr/local/bin/aye`, anything running as you could get root. The same goes
+  for modules: `pam_aye.so` is in `/usr/local/lib/pam`, owned by root, but
+  Homebrew's `pam_u2f` and `pam_reattach` aren't (see
+  [Touch ID and a YubiKey](#touch-id-and-a-yubikey)).
+- **Test before you close the door.** Keep a root shell (`sudo -s`) open,
+  then in a new terminal run `sudo -k; sudo true`. Close the root shell only
+  once that works.
+
+On Linux, several wrong passwords in a row can lock sudo for a few minutes
+(`pam_faillock`). That wears off by itself, and a deny on the phone doesn't
+count toward it.
+
+### If sudo stops working
+
+On Linux, try these in order:
+
+1. The root shell you kept open.
+2. polkit, which has its own PAM file and works without sudo, if you're in
+   its admin group (`wheel` on Arch, `sudo` on Debian and Ubuntu):
+
+   ```bash
+   pkexec cp /etc/pam.d/sudo.aye-backup /etc/pam.d/sudo
+   ```
+
+3. `su -`, if root has a password.
+4. Start from a USB stick, mount the disk and fix the file. This needs the
+   machine in front of you and, if the disk is encrypted, its passphrase.
+
+On a Mac only sudo reads `sudo_local`, so you can still sign in and unlock the
+screen. Try these in order:
+
+1. The root shell you kept open.
+2. The command `deploy/macos/pam.sh install` printed. It asks for your
+   password in a macOS dialog, which doesn't go through sudo, and takes the
+   line out:
+
+   ```bash
+   osascript -e 'do shell script "/usr/bin/sed -i .bak /pam_aye/d /etc/pam.d/sudo_local" with administrator privileges'
+   ```
+
+   If the trouble is a change of your own, put back the file as it was before
+   Aye's line went in:
+
+   ```bash
+   osascript -e 'do shell script "cp /etc/pam.d/sudo_local.aye-backup /etc/pam.d/sudo_local" with administrator privileges'
+   ```
+
+   With no backup there was no `sudo_local` before, and sudo works without
+   one: use `rm /etc/pam.d/sudo_local` in place of the `cp`.
+
+3. Start up in macOS Recovery, mount the Data volume in Disk Utility, and fix
+   `/Volumes/<disk> - Data/private/etc/pam.d/sudo_local` from Recovery's
+   Terminal. This needs the Mac in front of you and your password.
 
 ## Claude Code
 
@@ -267,8 +344,10 @@ auth  sufficient  /usr/local/lib/pam/pam_aye.so       ← the phone
 ```
 
 `sudo_local` is read-only, even for root: edit it with `sudo vi` and save
-with `:wq!`. `deploy/macos/pam.sh` puts `pam_aye` after the other two
-whichever order you set them up in.
+with `:wq!`. Keep a root shell (`sudo -s`) open in another terminal while
+you do, and read [Changing PAM safely](#changing-pam-safely) first.
+`deploy/macos/pam.sh` puts `pam_aye` after the other two whichever order you
+set them up in.
 
 Touch ID for sudo is off until you turn it on: macOS ships its line
 commented out. If there's no `sudo_local` yet, copy
