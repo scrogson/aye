@@ -985,7 +985,12 @@ async fn reg_start(State(s): S) -> Result<Json<CreationChallengeResponse>, Statu
         .collect();
     let (ccr, reg) = s
         .webauthn
-        .start_passkey_registration(Uuid::new_v4(), "approver", "Approver", Some(exclude))
+        .start_passkey_registration(
+            Uuid::new_v4(),
+            "approver",
+            &format!("Approver on {}", s.host),
+            Some(exclude),
+        )
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     *s.reg.lock().await = Some(reg);
     Ok(Json(ccr))
