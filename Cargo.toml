@@ -17,3 +17,8 @@ jwt-simple = { version = "0.12.17", default-features = false, features = ["pure-
 
 [dev-dependencies]
 ece = "2"
+
+# On macOS, build OpenSSL into the binaries (webauthn-rs and web-push need it)
+# so they don't depend on Homebrew's copy.
+[target.'cfg(target_os = "macos")'.dependencies]
+openssl = { version = "0.10", features = ["vendored"] }

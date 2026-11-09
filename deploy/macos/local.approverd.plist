@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  approverd as a launchd daemon. deploy/macos/setup.sh fills in @HOST@ (this
+  Mac's Tailscale name) and installs it to /Library/LaunchDaemons. It runs as
+  the hidden _approver user; passkeys.json, push.json, vapid.key, the activity
+  log and control.sock live in /var/db/approver, readable only by that user.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.approverd</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/approverd</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>APPROVER_HOST</key>
+    <string>@HOST@</string>
+  </dict>
+  <key>UserName</key>
+  <string>_approver</string>
+  <key>GroupName</key>
+  <string>_approver</string>
+  <!-- 0077: nothing it writes is readable by anyone else -->
+  <key>Umask</key>
+  <integer>63</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardErrorPath</key>
+  <string>/var/log/approverd.log</string>
+</dict>
+</plist>

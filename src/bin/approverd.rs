@@ -189,13 +189,42 @@ fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("{key} must be set"))
 }
 
-/// The daemon's control socket, in the runtime directory systemd makes for it.
+/// Where passkeys, push subscriptions, the VAPID key and the activity log
+/// live: the state directory systemd makes on Linux, /var/db/approver on macOS
+/// (made by deploy/macos/setup.sh).
+fn state_dir() -> String {
+    std::env::var("STATE_DIRECTORY").unwrap_or_else(|_| {
+        if cfg!(target_os = "macos") {
+            "/var/db/approver"
+        } else {
+            "/var/lib/approver"
+        }
+        .into()
+    })
+}
+
+/// The daemon's control socket: in the runtime directory systemd makes for it
+/// on Linux, and in the state directory on macOS (launchd makes no runtime
+/// directory, and /var/run is emptied at boot).
 fn socket_path() -> String {
     std::env::var("APPROVER_SOCKET").unwrap_or_else(|_| {
-        let dir = std::env::var("RUNTIME_DIRECTORY").unwrap_or_else(|_| "/run/approver".into());
+        let dir = std::env::var("RUNTIME_DIRECTORY").unwrap_or_else(|_| {
+            if cfg!(target_os = "macos") {
+                state_dir()
+            } else {
+                "/run/approver".into()
+            }
+        });
         format!("{dir}/control.sock")
     })
 }
+
+/// How to check on the service, for error messages.
+const SERVICE_STATUS: &str = if cfg!(target_os = "macos") {
+    "sudo launchctl print system/local.approverd"
+} else {
+    "systemctl status approverd"
+};
 
 #[tokio::main]
 async fn main() {
@@ -256,7 +285,7 @@ fn parse_duration(s: &str) -> Option<Duration> {
 /// Send one command to the running daemon and print its answer.
 async fn control_client(cmd: Value) -> i32 {
     let path = socket_path();
-    // Right after `systemctl restart` the daemon may not have made its socket
+    // Right after a restart the daemon may not have made its socket
     // yet, so wait a moment for it before giving up.
     let mut tries = 0;
     let connected = loop {
@@ -282,7 +311,7 @@ async fn control_client(cmd: Value) -> i32 {
         }
         Err(e) => {
             eprintln!(
-                "approverd: can't reach the daemon at {path}: {e}\nIs it running? systemctl status approverd"
+                "approverd: can't reach the daemon at {path}: {e}\nIs it running? {SERVICE_STATUS}"
             );
             return 1;
         }
@@ -319,7 +348,7 @@ async fn serve() {
         .rp_name("Approver")
         .build()
         .unwrap();
-    let state_dir = std::env::var("STATE_DIRECTORY").unwrap_or_else(|_| "/var/lib/approver".into());
+    let state_dir = state_dir();
     let keys_file = format!("{state_dir}/passkeys.json");
     let passkeys: Vec<Passkey> = std::fs::read_to_string(&keys_file)
         .ok()
