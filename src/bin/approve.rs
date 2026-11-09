@@ -23,17 +23,30 @@ fn parent_cmdline() -> String {
         .unwrap_or_else(|| "unknown command".into())
 }
 
-/// Ask approverd and wait for the phone. Any failure is a no.
-fn ask(request: &Value) -> Result<bool, reqwest::Error> {
-    reqwest::blocking::Client::builder()
+#[derive(PartialEq)]
+enum Answer {
+    Approved,
+    Denied,
+    /// Nobody answered in time (or the daemon said something we don't know).
+    Unanswered,
+}
+
+/// Ask approverd and wait for a signed answer from the phone.
+fn ask(request: &Value) -> Result<Answer, reqwest::Error> {
+    let v: Value = reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(2))
         .timeout(Duration::from_secs(70))
         .build()?
-        .post("http://127.0.0.1:7070/local/request")
+        .post("http://127.0.0.1:7070/local/ask")
         .json(request)
         .send()?
         .error_for_status()?
-        .json::<bool>()
+        .json()?;
+    Ok(match v["answer"].as_str() {
+        Some("approved") => Answer::Approved,
+        Some("denied") => Answer::Denied,
+        _ => Answer::Unanswered,
+    })
 }
 
 /// PAM mode, run by `auth sufficient pam_exec.so quiet /usr/local/bin/approve`.
@@ -61,32 +74,109 @@ fn pam(user: String) -> ! {
     let answer = ask(&request);
     if let Some(t) = tty.as_mut() {
         let _ = match &answer {
-            Ok(true) => writeln!(t, "Approved on your phone."),
-            Ok(false) => writeln!(t, "Not approved on your phone."),
+            Ok(Answer::Approved) => writeln!(t, "Approved on your phone."),
+            Ok(Answer::Denied) => writeln!(t, "Denied on your phone."),
+            Ok(Answer::Unanswered) => writeln!(t, "No answer from your phone."),
             Err(e) if e.is_connect() => writeln!(t, "Phone approval isn't running here."),
             Err(_) => writeln!(t, "Phone approval failed."),
         };
     }
-    std::process::exit(if matches!(answer, Ok(true)) { 0 } else { 1 });
+    std::process::exit(if matches!(answer, Ok(Answer::Approved)) { 0 } else { 1 });
+}
+
+/// What the phone shows for a Claude Code tool call: the command itself for
+/// Bash, the file or URL for the common tools, the raw input otherwise.
+fn describe(v: &Value) -> String {
+    let tool = v["tool_name"].as_str().unwrap_or("?");
+    let input = &v["tool_input"];
+    let field = |k: &str| input[k].as_str().map(str::to_string);
+    let what = match tool {
+        "Bash" => field("command"),
+        "Edit" | "MultiEdit" | "Write" | "Read" => field("file_path").map(|f| format!("{tool} {f}")),
+        "NotebookEdit" => field("notebook_path").map(|f| format!("{tool} {f}")),
+        "WebFetch" => field("url").map(|u| format!("{tool} {u}")),
+        "WebSearch" => field("query").map(|q| format!("{tool} {q}")),
+        _ => None,
+    }
+    .unwrap_or_else(|| format!("{tool} {input}"));
+    let mut text = match v["cwd"].as_str() {
+        Some(cwd) => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let cwd = match cwd.strip_prefix(&home) {
+                Some(rest) if !home.is_empty() => format!("~{rest}"),
+                _ => cwd.to_string(),
+            };
+            format!("# in {cwd}\n{what}")
+        }
+        None => what,
+    };
+    if text.chars().count() > 4000 {
+        text = text.chars().take(4000).collect::<String>() + "\n…";
+    }
+    text
+}
+
+/// Claude Code hook mode. Meant for PermissionRequest, which only fires when
+/// Claude would ask you anyway: a signed approval allows the call, a signed
+/// deny refuses it, and anything else (no answer, daemon down, screen not
+/// locked with --only-if) prints nothing, so Claude shows its usual prompt.
+/// PreToolUse works too, with the same fallbacks.
+fn hook(only_if: Option<String>) {
+    if let Some(cmd) = only_if {
+        let ok = std::process::Command::new("sh")
+            .args(["-c", &cmd])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            return;
+        }
+    }
+    let mut s = String::new();
+    std::io::stdin().read_to_string(&mut s).ok();
+    let v: Value = serde_json::from_str(&s).unwrap_or_default();
+    let event = v["hook_event_name"].as_str().unwrap_or("PermissionRequest").to_string();
+
+    let answer = ask(&json!({
+        "user": std::env::var("USER").unwrap_or_default(),
+        "kind": "claude",
+        "command": describe(&v),
+    }));
+    let approved = match answer {
+        Ok(Answer::Approved) => true,
+        Ok(Answer::Denied) => false,
+        _ => return,
+    };
+    let out = if event == "PreToolUse" {
+        json!({ "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": if approved { "allow" } else { "deny" },
+            "permissionDecisionReason": if approved { "Approved on the phone (passkey-signed)" } else { "Denied on the phone (passkey-signed)" },
+        }})
+    } else if approved {
+        json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": { "behavior": "allow" } } })
+    } else {
+        json!({ "hookSpecificOutput": { "hookEventName": "PermissionRequest", "decision": {
+            "behavior": "deny",
+            "message": "The user denied this on their phone.",
+        } } })
+    };
+    println!("{out}");
 }
 
 fn main() {
     if let Ok(user) = std::env::var("PAM_USER") {
         pam(user);
     }
-    // Claude Code PreToolUse hook: the tool call arrives as JSON on stdin.
-    let mut s = String::new();
-    std::io::stdin().read_to_string(&mut s).ok();
-    let v: Value = serde_json::from_str(&s).unwrap_or_default();
-    let approved = ask(&json!({
-        "user": std::env::var("USER").unwrap_or_default(),
-        "kind": "claude",
-        "command": v["tool_input"]["command"].as_str().unwrap_or("?"),
-    }))
-    .unwrap_or(false);
-    println!("{}", json!({ "hookSpecificOutput": {
-        "hookEventName": "PreToolUse",
-        "permissionDecision": if approved { "allow" } else { "deny" },
-        "permissionDecisionReason": "Passkey-signed remote approval"
-    }}));
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
+        [] => hook(None),
+        ["--only-if", cmd] => hook(Some(cmd.to_string())),
+        _ => {
+            eprintln!("usage: approve [--only-if <shell command>]   (Claude Code hook; JSON on stdin)\n       run from pam_exec for sudo");
+            std::process::exit(2);
+        }
+    }
 }

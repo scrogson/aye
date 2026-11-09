@@ -196,6 +196,7 @@ async fn serve() {
 
     let local = Router::new()
         .route("/local/request", post(request))
+        .route("/local/ask", post(ask))
         .with_state(app.clone());
     let public = Router::new()
         .route("/ui.css", get(|| async { page("text/css; charset=utf-8", include_str!("ui.css")) }))
@@ -358,14 +359,31 @@ struct Req {
     summary: Option<String>,
 }
 
+/// The original endpoint: true only for a signed approval.
 async fn request(State(s): S, Json(r): Json<Req>) -> Json<bool> {
+    Json(decide(s, r).await == Some(true))
+}
+
+/// Tells "denied" apart from "nobody answered", for callers that fall back
+/// to something else (the Claude Code hook shows its own dialog then).
+async fn ask(State(s): S, Json(r): Json<Req>) -> Json<Value> {
+    let answer = match decide(s, r).await {
+        Some(true) => "approved",
+        Some(false) => "denied",
+        None => "unanswered",
+    };
+    Json(json!({ "answer": answer }))
+}
+
+/// Push to the phone and wait for a signed answer; None if none came in time.
+async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
     let (user, command) = match (r.user, r.command, r.summary) {
         (user, Some(command), _) => (user.unwrap_or_default(), command),
         (_, None, Some(summary)) => match summary.split_once(": ") {
             Some((who, cmd)) => (who.split('@').next().unwrap_or(who).to_string(), cmd.to_string()),
             None => (String::new(), summary),
         },
-        _ => return Json(false),
+        _ => return None,
     };
     let kind = r.kind.unwrap_or_else(|| "sudo".into());
 
@@ -393,15 +411,12 @@ async fn request(State(s): S, Json(r): Json<Req>) -> Json<bool> {
         eprintln!("approverd: ntfy push failed: {e}");
     }
 
-    let ok = tokio::time::timeout_at(deadline, rx)
-        .await
-        .ok()
-        .and_then(Result::ok)
-        .unwrap_or(false);
+    let answer = tokio::time::timeout_at(deadline, rx).await.ok().and_then(Result::ok);
     guard.live = false;
     s.pending.lock().await.remove(&id);
-    eprintln!("approverd: {id} {}", if ok { "approved" } else { "denied or timed out" });
-    Json(ok)
+    let said = match answer { Some(true) => "approved", Some(false) => "denied", None => "timed out" };
+    eprintln!("approverd: {id} {said}");
+    answer
 }
 
 struct Withdraw {
