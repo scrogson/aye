@@ -35,14 +35,17 @@ to the Home Screen. It has three tabs:
 | `src/bin/approverd.rs` | The daemon: local API, Web Push, the pages, control socket, and the `approverd` CLI |
 | `src/bin/*.html`, `sw.js` | The Home Screen app: notifications setup, approval and passkey pages, service worker |
 | `src/bin/approve.rs` | The client: a PAM helper for sudo and a Claude Code hook |
-| `deploy/setup.sh` | Installs approverd and `tailscale serve` on this machine |
+| `deploy/setup.sh` | Installs approverd and `tailscale serve` on this machine (Linux, systemd) |
 | `deploy/pam.sh` | Adds phone approval to sudo (`test`, `install`, `remove`) |
 | `deploy/claude-hook.sh` | Adds the Claude Code hook to `~/.claude/settings.json` (`install`, `remove`) |
+| `deploy/macos/` | The same for a Mac: `setup.sh` (launchd), `pam.sh` (`sudo_local`) |
+| `pam/pam_approver.c` | The PAM module that runs `approve` on macOS, which has no `pam_exec` |
 
 ## Setup
 
 Needs Tailscale with HTTPS enabled for the tailnet, `jq`, a Rust toolchain,
-systemd, and an iPhone on iOS 16.4 or later (or any current browser). Run
+systemd, and an iPhone on iOS 16.4 or later (or any current browser). For a
+Mac, see [On a Mac](#on-a-mac). Run
 everything below from a normal terminal: `sudo` doesn't work inside the Claude
 app's terminal.
 
@@ -155,9 +158,9 @@ deploy/claude-hook.sh install
 ```
 
 By default it pushes only while the screen is locked, so at the desk you get
-Claude's prompt straight away. On Omarchy the script finds the lock check by
-itself; elsewhere give it a command that exits 0 when the screen is locked, or
-push for every prompt:
+Claude's prompt straight away. On Omarchy and macOS the script finds the lock
+check by itself; elsewhere give it a command that exits 0 when the screen is
+locked, or push for every prompt:
 
 ```bash
 ONLY_IF='my-lock-check' deploy/claude-hook.sh install
@@ -193,6 +196,50 @@ Use `"matcher": "Bash"` instead of `"*"` to send only shell commands to the
 phone. In `claude -p` and other sessions that can't show a prompt, an
 unanswered request is denied.
 
+## On a Mac
+
+Each machine runs its own approverd with its own name, passkeys and Home
+Screen app, so a Mac shows up on the phone as a second Approver
+(`https://<mac>.<tailnet>.ts.net`). Needs macOS 14 or later, Tailscale, the
+Xcode command line tools and a Rust toolchain. OpenSSL is built into the
+binaries, so Homebrew isn't needed.
+
+```bash
+cargo build --release
+deploy/macos/setup.sh
+```
+
+That makes a hidden `_approver` user and a launchd daemon, `local.approverd`,
+keeping its state in `/var/db/approver` and its log in
+`/var/log/approverd.log`. Then add the passkey and the Home Screen app as in
+steps 3 and 4 above. The `approverd` commands are the same; to check on the
+service itself: `sudo launchctl print system/local.approverd`.
+
+For sudo, macOS has no `pam_exec`, so `pam/pam_approver.c` does its job: it
+runs `approve` and lets sudo through only on a signed approval.
+`deploy/macos/pam.sh` builds it and puts one line in `/etc/pam.d/sudo_local`
+(which macOS keeps across updates), after Touch ID if that's on:
+
+```
+auth  sufficient  pam_tid.so                           ← unchanged, if there
+auth  sufficient  /usr/local/lib/pam/pam_approver.so   ← added
+```
+
+At the Mac you use Touch ID as before. Where Touch ID can't work, such as
+over SSH, the phone gets the request, and Enter, a deny or a timeout fall
+through to the password. Try it on a throwaway service first, then install:
+
+```bash
+deploy/macos/pam.sh test
+deploy/macos/pam.sh install
+```
+
+If sudo ever breaks, `install` prints an `osascript` command that removes the
+line through a macOS password dialog, which doesn't depend on sudo.
+
+The Claude Code hook installs the same way (`deploy/claude-hook.sh install`).
+It checks whether the Mac is locked with `ioreg`.
+
 ## Security notes
 
 - The pages are reachable only on the tailnet, through `tailscale serve`.
@@ -212,7 +259,8 @@ unanswered request is denied.
 - Opening Activity needs a passkey signature too. It sets an HttpOnly,
   SameSite=Strict cookie for 15 minutes; sessions live only in approverd's
   memory, so a restart signs everyone out. The log itself is
-  `/var/lib/private/approver/activity.jsonl` (last 1000 entries, readable only
-  by the service), and failed signatures are logged as well.
+  `/var/lib/private/approver/activity.jsonl` (`/var/db/approver` on a Mac;
+  last 1000 entries, readable only by the service), and failed signatures are
+  logged as well.
 - The local API on 127.0.0.1:7070 accepts requests from any local user, so
   any of them can send you a push. Approving still needs your passkey.

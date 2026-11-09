@@ -9,7 +9,8 @@
 #
 # By default the hook only pushes while the screen is locked, so at the desk
 # you just get Claude's prompt. That needs a command that exits 0 when the
-# screen is locked; Omarchy's is found by itself. Settings, both optional:
+# screen is locked; Omarchy's and macOS's are found by themselves. Settings,
+# both optional:
 #   ONLY_IF='<command>'   your own lock check (or any condition)
 #   ALWAYS=1              push for every prompt, locked or not
 set -euo pipefail
@@ -36,12 +37,16 @@ write() {
 
 case "${1:-}" in
   install)
-    [[ -x $APPROVE ]] || { echo "install approve first (deploy/pam.sh test or install puts it in $APPROVE)"; exit 1; }
+    [[ -x $APPROVE ]] || { echo "install approve first (deploy/pam.sh, or deploy/macos/pam.sh on a Mac, puts it in $APPROVE)"; exit 1; }
     cmd=$APPROVE
     if [[ ${ALWAYS:-} == 1 ]]; then
       echo "Pushing every permission prompt to the phone."
     else
-      only_if=${ONLY_IF:-$(command -v omarchy-hyprland-session-locked || true)}
+      # Omarchy has a lock check; on macOS the console session says whether
+      # the screen is locked (the key is only there, as Yes, while it is).
+      mac_lock="ioreg -n Root -d1 | grep -q '\"CGSSessionScreenIsLocked\"=Yes'"
+      [[ $(uname) == Darwin ]] && default=$mac_lock || default=$(command -v omarchy-hyprland-session-locked || true)
+      only_if=${ONLY_IF:-$default}
       [[ -n $only_if ]] || { echo "no lock check found: set ONLY_IF='<command that exits 0 when locked>' or ALWAYS=1"; exit 1; }
       cmd="$APPROVE --only-if $(printf '%q' "$only_if")"
       echo "Pushing permission prompts to the phone while this is true: $only_if"
