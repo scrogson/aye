@@ -34,12 +34,13 @@ to the Home Screen. It has three tabs:
 | --- | --- |
 | `src/bin/ayed.rs` | The daemon: local API, Web Push, the pages, control socket, and the `ayed` CLI |
 | `src/bin/*.html`, `sw.js` | The Home Screen app: notifications setup, approval and passkey pages, service worker |
-| `src/bin/aye.rs` | The client: a PAM helper for sudo and a Claude Code hook |
+| `src/bin/aye.rs` | The client: a PAM helper for sudo, a Claude Code hook, and the admin commands (it runs `ayed`) |
 | `deploy/setup.sh` | Installs ayed and `tailscale serve` on this machine (Linux, systemd) |
 | `deploy/pam.sh` | Adds phone approval to sudo (`test`, `install`, `remove`) |
 | `deploy/claude-hook.sh` | Adds the Claude Code hook to `~/.claude/settings.json` (`install`, `remove`) |
 | `deploy/macos/` | The same for a Mac: `setup.sh` (launchd), `pam.sh` (`sudo_local`) |
 | `pam/pam_aye.c` | The PAM module that runs `aye` on macOS, which has no `pam_exec` |
+| `assets/icon.svg` | The app icon; `src/bin/icon-*.png` and `assets/icon-1024.png` are made from it |
 
 ## Setup
 
@@ -264,3 +265,15 @@ It checks whether the Mac is locked with `ioreg`.
   logged as well.
 - The local API on 127.0.0.1:7070 accepts requests from any local user, so
   any of them can send you a push. Approving still needs your passkey.
+
+## Icon
+
+`assets/icon.svg` is "aye!" set in [Pacifico](https://github.com/googlefonts/Pacifico)
+by Vernon Adams and the Pacifico Project Authors, under the SIL Open Font
+License 1.1. The letters are stored as outlines, so no font is needed. After
+changing it, make the PNGs with:
+
+```bash
+rsvg-convert -w 1024 -h 1024 assets/icon.svg -o assets/icon-1024.png
+for n in 180 192 512; do rsvg-convert -w $n -h $n assets/icon.svg -o src/bin/icon-$n.png; done
+```
