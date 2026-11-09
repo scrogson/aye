@@ -1,0 +1,16 @@
+# ntfy for approval pushes. Reachable only over Tailscale:
+#   tailscale serve --bg --https=8443 http://127.0.0.1:2586
+# The phone subscribes at base-url; ntfy.sh only relays a wake-up for iOS
+# (a hash of the topic URL), never the message itself.
+base-url: "https://desk.tailnet-name.ts.net:8443"
+listen-http: "127.0.0.1:2586"
+behind-proxy: true
+
+cache-file: "/var/cache/ntfy/cache.db"
+cache-duration: "12h"
+
+auth-file: "/var/lib/ntfy/user.db"
+auth-default-access: "deny-all"
+enable-signup: false
+
+upstream-base-url: "https://ntfy.sh"

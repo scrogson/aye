@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Add a passkey</title>
+<link rel="stylesheet" href="/ui.css">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-faceid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1M9 16.2c1.8 1.4 4.2 1.4 6 0"/></g></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z"/><path d="M12 10v4M12 17v.01"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></g></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round" d="M12 3l7 3v5.5c0 4.3-3 8-7 9.5-4-1.5-7-5.2-7-9.5V6z"/></symbol>
+  <symbol id="i-closed" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></g></symbol>
+</svg>
+<main class="screen" id="app">
+  <div class="body"><div class="result"><div class="waiting"><span class="spin"></span>Checking registration…</div></div></div>
+</main>
+<script>
+const app = document.getElementById("app");
+const SVG = "http://www.w3.org/2000/svg";
+let status = null;    // { open, passkeys, host, rp_id }
+let options = null;   // parsed WebAuthn creation options
+let busy = false;
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el[k] = v;
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : String(kid));
+  }
+  return el;
+}
+function icon(id) {
+  const s = document.createElementNS(SVG, "svg");
+  const u = document.createElementNS(SVG, "use");
+  u.setAttribute("href", "#" + id);
+  s.append(u);
+  return s;
+}
+function render(body, actions) {
+  app.replaceChildren(h("div", { class: "body" }, body), actions || []);
+}
+const plural = n => n === 1 ? "1 passkey" : `${n} passkeys`;
+
+function result(tone, ic, title, text, code) {
+  render(h("div", { class: "result" },
+    h("div", { class: `badge ${tone}` }, icon(ic)),
+    h("h1", null, title),
+    h("p", null, text),
+    code && h("div", { class: "cmd small" }, code)));
+}
+
+function showClosed() {
+  result("idle", "i-closed", "Registration is closed",
+    `To add a passkey, open registration from a terminal on ${status.host}, then reload this page.`,
+    "deploy/register.sh open");
+}
+
+function showOpen(error) {
+  const add = h("button", { class: "btn primary", type: "button", onclick: add_ }, icon("i-faceid"), "Add passkey");
+  add.disabled = !options;
+  const n = status.passkeys;
+  render([
+    h("span", { class: "chip" }, h("span", { class: "dot" }), "Registration open"),
+    h("h1", null, `Add a passkey to ${status.host}`),
+    h("p", { class: "lede" }, `This device will be able to approve sudo on ${status.host} with Face ID.`),
+    h("div", { class: "count" }, icon("i-key"), n ? `${plural(n)} already registered` : "No passkeys registered yet"),
+    h("ul", { class: "facts" },
+      h("li", null, icon("i-shield"), h("span", null, `Works only on ${status.rp_id}. Each machine needs its own.`)),
+      h("li", null, icon("i-faceid"), h("span", null, "Every approval asks for Face ID, so an unlocked phone alone can't approve.")),
+      h("li", null, icon("i-key"), h("span", null, "Add a YubiKey from another computer too, as a backup."))),
+    error && h("p", { class: "error" }, error),
+  ], h("div", { class: "actions one" }, add));
+}
+
+// Fetched ahead of the tap, so the tap goes straight to Face ID.
+async function loadOptions() {
+  const r = await fetch("/register/start", { method: "POST" });
+  if (r.status === 403) return "closed";
+  if (!r.ok) return "error";
+  options = PublicKeyCredential.parseCreationOptionsFromJSON((await r.json()).publicKey);
+  return "ok";
+}
+
+async function add_() {
+  if (busy || !options) return;
+  busy = true;
+  app.querySelector(".actions").replaceWith(
+    h("div", { class: "actions one" }, h("div", { class: "waiting" }, h("span", { class: "spin" }), "Confirm with Face ID…")));
+
+  let cred;
+  try {
+    cred = await navigator.credentials.create({ publicKey: options });
+  } catch (e) {
+    busy = false;
+    // InvalidStateError: this device already holds one of the registered passkeys.
+    const msg = e && e.name === "InvalidStateError"
+      ? `This device already has a passkey for ${status.host}.`
+      : "Nothing was added: Face ID was cancelled. Try again.";
+    return showOpen(msg);
+  }
+  const r = await fetch("/register/finish", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(cred.toJSON()),
+  });
+  busy = false;
+  if (r.ok) {
+    return result("ok", "i-check", "Passkey added",
+      `${status.host} now has ${plural(status.passkeys + 1)}. When you're done adding them, close registration on ${status.host}:`,
+      "deploy/register.sh close");
+  }
+  if (r.status === 403) { status.open = false; return showClosed(); }
+  options = null;
+  result("bad", "i-alert", "The passkey wasn't added",
+    `${status.host} couldn't verify it. Reload this page to try again.`);
+}
+
+(async () => {
+  if (!window.PublicKeyCredential?.parseCreationOptionsFromJSON) {
+    return render(h("div", { class: "result" },
+      h("div", { class: "badge bad" }, icon("i-alert")),
+      h("h1", null, "This browser can't create a passkey"),
+      h("p", null, "Open this page in Safari on an up-to-date iPhone, or in a current desktop browser.")));
+  }
+  try {
+    status = await (await fetch("/register/status")).json();
+  } catch {
+    return render(h("div", { class: "result" },
+      h("div", { class: "badge bad" }, icon("i-alert")),
+      h("h1", null, "Couldn't reach this machine"),
+      h("p", null, "Check that Tailscale is connected on this device, then reload.")));
+  }
+  if (!status.open) return showClosed();
+  showOpen();
+  const state = await loadOptions();
+  if (state === "closed") return showClosed();
+  if (state === "error") return showOpen("Couldn't start registration. Reload to try again.");
+  showOpen();
+})();
+</script>
+</body>
+</html>

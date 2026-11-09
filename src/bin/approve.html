@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Approval request</title>
+<link rel="stylesheet" href="/ui.css">
+</head>
+<body>
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-faceid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1M9 16.2c1.8 1.4 4.2 1.4 6 0"/></g></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></g></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z"/><path d="M12 10v4M12 17v.01"/></g></symbol>
+</svg>
+<main class="screen" id="app">
+  <div class="body"><div class="result"><div class="waiting"><span class="spin"></span>Loading request…</div></div></div>
+</main>
+<script>
+const base = location.pathname.replace(/\/$/, "");
+const ref = base.split("/").pop().slice(0, 8);
+const app = document.getElementById("app");
+const SVG = "http://www.w3.org/2000/svg";
+
+let req = null;        // { host, user, kind, command }
+let options = null;    // parsed WebAuthn request options for the current challenge
+let deadline = 0;      // ms timestamp, from the daemon's seconds-left
+let total = 60;
+let ticker = null;
+let busy = false;
+let done = false;
+let last = true;       // the last decision tried, for "Try again"
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el[k] = v;
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : String(kid)); // text, never HTML
+  }
+  return el;
+}
+function icon(id) {
+  const s = document.createElementNS(SVG, "svg");
+  const u = document.createElementNS(SVG, "use");
+  u.setAttribute("href", "#" + id);
+  s.append(u);
+  return s;
+}
+const what = () => `${req.kind === "claude" ? "Claude Code" : "sudo"} on ${req.host}`;
+const secondsLeft = () => Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+const fmt = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left`;
+
+function cmdBlock(small) {
+  const who = req.user ? `${req.user}@${req.host}` : req.host;
+  return h("div", { class: small ? "cmd small" : "cmd" },
+    h("span", { class: "who" }, who),
+    h("span", { class: "run" }, req.command));
+}
+function timerBlock(label) {
+  const s = secondsLeft();
+  const fill = h("div", { class: "fill" });
+  fill.style.width = `${(s / total) * 100}%`;
+  return h("div", { class: s <= 15 ? "timer low" : "timer" },
+    h("div", { class: "row" }, h("span", null, label), h("span", { class: "left" }, fmt(s))),
+    h("div", { class: "track" }, fill));
+}
+function render(body, actions) {
+  app.replaceChildren(h("div", { class: "body" }, body), actions || []);
+}
+function spinner(text) {
+  return h("div", { class: "actions one" }, h("div", { class: "waiting" }, h("span", { class: "spin" }), text));
+}
+
+function tick() {
+  if (done) return;
+  const s = secondsLeft();
+  if (s <= 0) return finish("expired");
+  for (const t of app.querySelectorAll(".timer")) {
+    t.querySelector(".left").textContent = fmt(s);
+    t.querySelector(".fill").style.width = `${(s / total) * 100}%`;
+    t.classList.toggle("low", s <= 15);
+  }
+}
+
+function showWaiting() {
+  const approve = h("button", { class: "btn primary", type: "button", onclick: () => decide(true) }, icon("i-faceid"), "Approve");
+  const deny = h("button", { class: "btn secondary", type: "button", onclick: () => decide(false) }, "Deny");
+  render([
+    h("span", { class: "chip" }, h("span", { class: "dot" }), what()),
+    h("h1", null, "Approve this command?"),
+    cmdBlock(false),
+    h("dl", { class: "meta" },
+      h("dt", null, "Machine"), h("dd", null, req.host),
+      h("dt", null, "Asked by"), h("dd", null, `${req.user || "unknown"}, through ${req.kind === "claude" ? "Claude Code" : "sudo"}`),
+      h("dt", null, "Request"), h("dd", { class: "mono" }, ref)),
+    timerBlock("Waiting for your answer"),
+    h("p", { class: "note" }, icon("i-faceid"), h("span", null, `Either answer is signed with your passkey. Nothing runs on ${req.host} until you approve.`)),
+  ], h("div", { class: "actions" }, deny, approve));
+}
+
+function showFailed(title, text, ready) {
+  const retry = h("button", { class: "btn primary", type: "button", onclick: () => decide(last) }, icon("i-faceid"), "Try again");
+  retry.disabled = !ready;
+  render(h("div", { class: "result" },
+    h("div", { class: "badge bad" }, icon("i-alert")),
+    h("h1", null, title),
+    h("p", null, text),
+    timerBlock("Still waiting")), h("div", { class: "actions one" }, retry));
+  return retry;
+}
+
+function finish(kind) {
+  done = true;
+  clearInterval(ticker);
+  const at = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  const views = {
+    approved: ["ok", "i-check", "Approved", () => `${what()} will continue. You can close this page.`, true],
+    denied: ["bad", "i-x", "Denied", () => `${what()} was refused. Nothing ran.`, true],
+    expired: ["idle", "i-clock", "This request has expired",
+      () => `Requests wait 60 seconds, then count as denied. Run the command${req ? ` on ${req.host}` : ""} again to get a new one.`, false],
+  };
+  const [tone, ic, title, text, signed] = views[kind];
+  render(h("div", { class: "result" },
+    h("div", { class: `badge ${tone}` }, icon(ic)),
+    h("h1", null, title),
+    h("p", null, text()),
+    signed && cmdBlock(true),
+    signed && h("p", { class: "stamp" }, `Signed with your passkey at ${at}`)));
+}
+
+function showLoadError() {
+  done = true;
+  render(h("div", { class: "result" },
+    h("div", { class: "badge bad" }, icon("i-alert")),
+    h("h1", null, "Couldn't load this request"),
+    h("p", null, "The machine didn't answer. Check that Tailscale is connected on this phone, then reload.")),
+    h("div", { class: "actions one" }, h("button", { class: "btn primary", type: "button", onclick: () => location.reload() }, "Reload")));
+}
+
+// Fetch a fresh single-use challenge. Called on load and after a failed
+// signature, never inside a tap: iOS only lets a tap open Face ID if nothing
+// slow happens between the tap and the passkey call.
+async function loadChallenge() {
+  let r;
+  try { r = await fetch(base + "/challenge", { method: "POST" }); } catch { return "error"; }
+  if (r.status === 404) return "expired";
+  if (!r.ok) return "error";
+  const d = await r.json();
+  req = { host: d.host, user: d.user, kind: d.kind, command: d.command };
+  deadline = Date.now() + d.expires_in * 1000;
+  options = PublicKeyCredential.parseRequestOptionsFromJSON(d.options.publicKey);
+  return "ok";
+}
+
+async function decide(approve) {
+  if (busy || done || !options) return;
+  busy = true;
+  last = approve;
+  const actions = app.querySelector(".actions");
+  if (actions) actions.replaceWith(spinner("Confirm with Face ID…"));
+
+  let cred;
+  try {
+    cred = await navigator.credentials.get({ publicKey: options });
+  } catch {
+    busy = false;
+    if (done) return;
+    // Cancelled, or no passkey for this machine on the device. The daemon
+    // never saw it, so the same challenge is still good for another try.
+    showFailed("Nothing was signed", "Face ID was cancelled or found no passkey for this machine. Try again before the timer runs out.", true);
+    return;
+  }
+
+  let r;
+  try {
+    r = await fetch(base + "/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approve, credential: cred.toJSON() }),
+    });
+  } catch {
+    r = { ok: false, status: 0 };
+  }
+  busy = false;
+  if (done) return;
+  if (r.ok) return finish(approve ? "approved" : "denied");
+  if (r.status === 404) return finish("expired");
+
+  // The daemon spent this challenge on a signature it rejected: get a new one.
+  options = null;
+  const retry = showFailed("Your passkey didn't verify", `Nothing was approved. Try again before the timer runs out, using a passkey registered on ${req.host}.`, false);
+  const state = await loadChallenge();
+  if (state === "expired") return finish("expired");
+  if (state === "ok" && !done) retry.disabled = false;
+}
+
+(async () => {
+  if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON) {
+    done = true;
+    render(h("div", { class: "result" },
+      h("div", { class: "badge bad" }, icon("i-alert")),
+      h("h1", null, "This browser can't sign with a passkey"),
+      h("p", null, "Open the link in Safari on an up-to-date iPhone, or in a current desktop browser.")));
+    return;
+  }
+  const state = await loadChallenge();
+  if (state === "expired") return finish("expired");
+  if (state === "error") return showLoadError();
+  total = Math.max(60, secondsLeft());
+  showWaiting();
+  ticker = setInterval(tick, 1000);
+})();
+</script>
+</body>
+</html>

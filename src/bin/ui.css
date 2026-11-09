@@ -1,0 +1,130 @@
+/* Shared by approve.html and register.html. Ink and paper, one amber signal
+   for "waiting on you". System fonts only: the pages load nothing from other hosts. */
+:root {
+  --surface: #ffffff;
+  --ink: #142029;
+  --muted: #5a6670;
+  --line: #d9dedd;
+  --code: #f3f5f3;
+  --accent: #b86200;
+  --accent-soft: #fbefdf;
+  --ok: #1e7a4c;
+  --ok-soft: #e3f3ea;
+  --bad: #b1232e;
+  --bad-soft: #fbe6e7;
+  --on-ink: #ffffff;
+  --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", system-ui, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface: #151c23; --ink: #e6ecef; --muted: #93a0aa; --line: #26313a; --code: #0f151b;
+    --accent: #f0a23a; --accent-soft: #33260f; --ok: #4cc38a; --ok-soft: #12291e;
+    --bad: #f17b84; --bad-soft: #321619; --on-ink: #0c1116;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--surface);
+  color: var(--ink);
+  font: 16px/1.45 var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+}
+.sprite { position: absolute; width: 0; height: 0; }
+
+.screen { min-height: 100%; max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; }
+.body {
+  flex: 1;
+  padding: calc(24px + env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 16px max(20px, env(safe-area-inset-left));
+  display: flex; flex-direction: column; gap: 18px;
+}
+.chip {
+  align-self: flex-start;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  font-size: 13px; font-weight: 600;
+  background: var(--accent-soft); color: var(--accent);
+}
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+h1 { font: 700 26px/1.15 var(--font-display); margin: 0; letter-spacing: -0.01em; text-wrap: balance; }
+.lede { margin: -8px 0 0; color: var(--muted); }
+
+.cmd {
+  border: 1px solid var(--line);
+  background: var(--code);
+  border-radius: 14px;
+  padding: 12px 14px;
+  font: 15px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow: auto;
+}
+.cmd .who { display: block; color: var(--muted); font-size: 13px; }
+.cmd .run { font-weight: 600; }
+.cmd.small { font-size: 13.5px; padding: 10px 12px; }
+
+dl.meta { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 14px; }
+dl.meta dt { color: var(--muted); }
+dl.meta dd { margin: 0; overflow-wrap: anywhere; }
+dl.meta .mono { font-family: var(--font-mono); font-size: 13px; }
+
+.timer { display: grid; gap: 6px; }
+.timer .row { display: flex; justify-content: space-between; font-size: 13.5px; color: var(--muted); }
+.timer .left { font-variant-numeric: tabular-nums; color: var(--ink); font-weight: 600; }
+.timer .track { height: 4px; border-radius: 4px; background: var(--line); overflow: hidden; }
+.timer .fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 1s linear; }
+.timer.low .fill { background: var(--bad); }
+.timer.low .left { color: var(--bad); }
+
+.note { font-size: 13px; color: var(--muted); margin: auto 0 0; display: flex; gap: 8px; align-items: flex-start; }
+.note svg { flex: none; width: 15px; height: 15px; margin-top: 2px; }
+.error { margin: 0; font-size: 14px; color: var(--bad); }
+
+.actions {
+  position: sticky; bottom: 0;
+  padding: 12px max(16px, env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+  border-top: 1px solid var(--line);
+  display: grid; grid-template-columns: 1fr 1.4fr; gap: 10px;
+  background: var(--surface);
+}
+.actions.one { grid-template-columns: 1fr; }
+.btn {
+  appearance: none; border: 0; cursor: pointer;
+  min-height: 52px; border-radius: 14px; padding: 0 16px;
+  font: 600 17px/1 var(--font-body);
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  -webkit-tap-highlight-color: transparent;
+}
+.btn svg { width: 21px; height: 21px; }
+.btn.primary { background: var(--ink); color: var(--on-ink); }
+.btn.secondary { background: transparent; color: var(--ink); box-shadow: inset 0 0 0 1.5px var(--line); }
+.btn:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.btn:active { transform: scale(0.98); }
+.btn[disabled] { opacity: .5; cursor: default; transform: none; }
+
+.result { flex: 1; display: flex; flex-direction: column; gap: 14px; justify-content: center; padding-bottom: 24px; }
+.badge { width: 56px; height: 56px; border-radius: 18px; display: grid; place-items: center; }
+.badge svg { width: 28px; height: 28px; }
+.badge.ok { background: var(--ok-soft); color: var(--ok); }
+.badge.bad { background: var(--bad-soft); color: var(--bad); }
+.badge.idle { background: var(--code); color: var(--muted); }
+.result p { margin: 0; color: var(--muted); }
+.result .stamp { font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.waiting { display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--muted); font-weight: 600; min-height: 52px; }
+.spin { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--line); border-top-color: var(--ink); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation: none; } .timer .fill { transition: none; } .btn:active { transform: none; } }
+
+.count { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; font-size: 14px; }
+.count svg { width: 18px; height: 18px; color: var(--muted); flex: none; }
+ul.facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; font-size: 15px; }
+ul.facts li { display: grid; grid-template-columns: 18px 1fr; gap: 10px; }
+ul.facts svg { width: 16px; height: 16px; margin-top: 3px; color: var(--muted); }
