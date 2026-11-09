@@ -267,6 +267,8 @@ async fn serve() {
         .route("/register/status", get(reg_status))
         .route("/register/start", post(reg_start))
         .route("/register/finish", post(reg_finish))
+        // A real page, not an empty body a browser might keep showing.
+        .fallback(|| async { (StatusCode::NOT_FOUND, page("text/html; charset=utf-8", NOT_FOUND)) })
         .with_state(app);
 
     // Overridable only so a test copy can run beside the installed one.
@@ -427,6 +429,8 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
 
 /// A page or stylesheet: never cached, never framed (so the Approve button
 /// can't be overlaid by another site), and only able to talk to this origin.
+const NOT_FOUND: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Not found</title><link rel="stylesheet" href="/ui.css"></head><body><main class="screen"><div class="body"><div class="result"><h1>Nothing here</h1><p>Approval requests open from their notification. <a href="/">Go to Approver</a>.</p></div></div></main></body></html>"#;
+
 fn page<B: IntoResponse>(content_type: &'static str, body: B) -> impl IntoResponse {
     (
         [
@@ -766,12 +770,11 @@ async fn manifest(State(s): S) -> impl IntoResponse {
         "start_url": "/",
         "scope": "/",
         "display": "standalone",
-        "background_color": "#151c23",
-        "theme_color": "#151c23",
+        "background_color": "#122033",
+        "theme_color": "#122033",
         "icons": [
             { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
-            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" },
-            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+            { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
         ]
     });
     page("application/manifest+json", body.to_string())

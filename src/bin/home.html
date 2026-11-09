@@ -28,10 +28,20 @@
   <div class="body"><div class="result"><div class="waiting"><span class="spin"></span>Loading…</div></div></div>
 </main>
 <script>
+// If anything below throws, say so on the page rather than leaving it blank.
+function crashed(msg) {
+  const m = document.getElementById("app");
+  m.innerHTML = '<div class="body"><div class="result"><h1>Something went wrong</h1><p class="error"></p><p>Reload to try again. If it keeps happening, send this message along.</p></div></div>';
+  m.querySelector(".error").textContent = msg;
+}
+addEventListener("error", e => crashed(`${e.message} (line ${e.lineno})`));
+addEventListener("unhandledrejection", e => crashed(String(e.reason && (e.reason.stack || e.reason.message) || e.reason)));
+</script>
+<script>
 const app = document.getElementById("app");
 const SVG = "http://www.w3.org/2000/svg";
 let info = null;      // { key, host, passkeys }
-let reg = null;       // ServiceWorkerRegistration
+let swReady = null;   // Promise<ServiceWorkerRegistration>, started on load, awaited only when needed
 let sub = null;       // PushSubscription waiting for the Face ID step
 let login = null;     // { id, options } passkey challenge, fetched ahead of the tap
 let busy = false;
@@ -65,6 +75,9 @@ function result(tone, ic, title, ...text) {
     h("h1", null, title),
     ...text.map(t => typeof t === "string" ? h("p", null, t) : t));
 }
+const logo = () => h("img", { class: "logo", src: "/icon-192.png", alt: "", width: "64", height: "64" });
+const late = (ms, what) => new Promise((_, no) => setTimeout(() => no(new Error(`${what} took too long`)), ms));
+const worker = () => Promise.race([swReady, late(20000, "Setting up the service worker")]);
 function spinner(text) {
   return h("div", { class: "actions one" }, h("div", { class: "waiting" }, h("span", { class: "spin" }), text));
 }
@@ -89,6 +102,7 @@ function sameKey(subscription) {
 
 function showInstall() {
   render([
+    logo(),
     h("span", { class: "chip" }, h("span", { class: "dot" }), "One-time setup"),
     h("h1", null, "Add Approver to your Home Screen"),
     h("p", { class: "lede" }, "iPhone only sends notifications to web apps on the Home Screen. Then approval requests arrive like any other app's."),
@@ -120,6 +134,7 @@ function showBlocked() {
 
 function showOff(error) {
   render([
+    logo(),
     h("span", { class: "chip" }, h("span", { class: "dot" }), "Notifications off"),
     h("h1", null, `Get ${info.host}'s approval requests here`),
     h("p", { class: "lede" }, `When sudo or Claude Code on ${info.host} needs you, this device gets a notification. Tap it to approve with Face ID.`),
@@ -174,12 +189,13 @@ async function turnOn() {
     const p = await Notification.requestPermission();
     if (p === "denied") { busy = false; return showBlocked(); }
     if (p !== "granted") { busy = false; return showOff("Notifications weren't allowed. Try again."); }
+    const reg = await worker();
     let s = await reg.pushManager.getSubscription();
     if (s && !sameKey(s)) { await s.unsubscribe(); s = null; }
     sub = s || await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(info.key) });
   } catch (e) {
     busy = false;
-    return showOff(`Couldn't turn on notifications (${e && e.name || "error"}). Try again.`);
+    return showOff(`Couldn't turn on notifications: ${e && (e.message || e.name) || "unknown error"}. Try again.`);
   }
   busy = false;
   showConfirm();
@@ -220,7 +236,8 @@ async function confirm_() {
 async function sendTest() {
   if (busy) return;
   busy = true;
-  const s = await reg.pushManager.getSubscription();
+  const reg = await navigator.serviceWorker.getRegistration("/");
+  const s = reg && await reg.pushManager.getSubscription();
   let r;
   try {
     r = await fetch("/push/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: s && s.endpoint }) });
@@ -238,18 +255,23 @@ async function sendTest() {
     return isIOS && !standalone ? showInstall() : showUnsupported();
   }
   if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON) return showUnsupported();
+  // Installing the worker can be slow the first time; nothing on screen waits for it.
+  swReady = navigator.serviceWorker.register("/sw.js", { scope: "/" }).then(() => navigator.serviceWorker.ready);
+  swReady.catch(() => {}); // reported when a tap needs it
   try {
-    [info, reg] = await Promise.all([
-      fetch("/push/key").then(r => r.json()),
-      navigator.serviceWorker.register("/sw.js", { scope: "/" }).then(() => navigator.serviceWorker.ready),
+    info = await Promise.race([
+      fetch("/push/key").then(r => { if (!r.ok) throw new Error(`/push/key answered ${r.status}`); return r.json(); }),
+      late(10000, "Reaching this machine"),
     ]);
-  } catch {
-    return render(result("bad", "i-alert", "Couldn't reach this machine",
-      "Check that Tailscale is connected on this device, then reload."),
+  } catch (e) {
+    return render(result("bad", "i-alert", "Couldn't start",
+      "Check that Tailscale is connected on this device, then reload.",
+      h("p", { class: "stamp" }, String(e && e.message || e))),
       h("div", { class: "actions one" }, button("Reload", null, () => location.reload())));
   }
   if (Notification.permission === "denied") return showBlocked();
-  const s = await reg.pushManager.getSubscription();
+  const existing = await navigator.serviceWorker.getRegistration("/");
+  const s = existing && await existing.pushManager.getSubscription();
   if (s && sameKey(s) && Notification.permission === "granted") {
     const known = await fetch("/push/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint: s.endpoint }) })
       .then(r => r.json()).then(d => d.known).catch(() => false);

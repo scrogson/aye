@@ -43,6 +43,7 @@ body {
   padding: calc(24px + env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 16px max(20px, env(safe-area-inset-left));
   display: flex; flex-direction: column; gap: 18px;
 }
+.logo { width: 64px; height: 64px; border-radius: 15px; display: block; }
 .chip {
   align-self: flex-start;
   display: inline-flex; align-items: center; gap: 6px;
