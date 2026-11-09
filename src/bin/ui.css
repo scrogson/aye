@@ -129,3 +129,48 @@ dl.meta .mono { font-family: var(--font-mono); font-size: 13px; }
 ul.facts { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; font-size: 15px; }
 ul.facts li { display: grid; grid-template-columns: 18px 1fr; gap: 10px; }
 ul.facts svg { width: 16px; height: 16px; margin-top: 3px; color: var(--muted); }
+
+/* Tab bar along the bottom of the app (put in by approverd where a page says <!--tabs-->). */
+.tabbed { --tabs-h: calc(54px + env(safe-area-inset-bottom)); padding-bottom: var(--tabs-h); }
+.tabbed .actions { bottom: var(--tabs-h); padding-bottom: 12px; }
+.tabs {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+  height: var(--tabs-h);
+  padding: 0 max(8px, env(safe-area-inset-right)) env(safe-area-inset-bottom) max(8px, env(safe-area-inset-left));
+  display: grid; grid-template-columns: repeat(3, minmax(0, 150px)); justify-content: center;
+  border-top: 1px solid var(--line);
+  background: var(--surface);
+}
+.tabs a {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px;
+  color: var(--muted); text-decoration: none; font-size: 10.5px; font-weight: 600;
+  -webkit-tap-highlight-color: transparent;
+}
+.tabs a svg { width: 25px; height: 25px; }
+.tabs a[aria-current="page"] { color: var(--accent); }
+.tabs a:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; border-radius: 10px; }
+
+/* Activity */
+.head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.head .sub { color: var(--muted); font-size: 14px; }
+.section { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 6px 0 -6px; }
+.feed { list-style: none; margin: 0; padding: 0; display: grid; }
+.feed li { display: grid; grid-template-columns: 30px 1fr; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.feed li:last-child { border-bottom: 0; }
+.feed .ic { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--code); color: var(--muted); }
+.feed .ic svg { width: 17px; height: 17px; }
+.feed .ic.ok { background: var(--ok-soft); color: var(--ok); }
+.feed .ic.bad { background: var(--bad-soft); color: var(--bad); }
+.feed .ic.wait { background: var(--accent-soft); color: var(--accent); }
+.feed .t { font-weight: 600; font-size: 15px; }
+.feed .t .k { color: var(--muted); font-weight: 500; }
+.feed .c {
+  margin-top: 4px; font-family: var(--font-mono); font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.feed .m { margin-top: 4px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.feed a.wait { display: block; color: inherit; text-decoration: none; border: 1.5px solid var(--accent); border-radius: 14px; padding: 12px 14px; margin: 4px 0; }
+.feed li.waiting { grid-template-columns: 1fr; border: 0; padding: 0; }
+.empty { color: var(--muted); text-align: center; padding: 32px 0; }
+.banner { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 14px; background: var(--bad-soft); color: var(--bad); font-size: 14px; font-weight: 600; text-decoration: none; }
+.banner svg { width: 18px; height: 18px; flex: none; margin-top: 1px; }

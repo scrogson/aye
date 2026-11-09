@@ -18,7 +18,15 @@ sudo / Claude Code ──► approve ──► approverd (127.0.0.1:7070) ──
 ```
 
 Nothing to install on the phone: the app is the pages approverd serves, added
-to the Home Screen.
+to the Home Screen. It has three tabs:
+
+- **Notifications**: turn them on for this device, or send a test.
+- **Activity**: requests waiting now, and a history of every approval,
+  denial, timeout and cancellation (which passkey signed, how long it took),
+  plus changes to passkeys, devices and registration. It shows commands, so it
+  opens with Face ID and stays unlocked for 15 minutes.
+- **Passkeys**: how many are registered, and adding one while registration
+  is open.
 
 ## What's in here
 
@@ -83,6 +91,8 @@ sudo approverd passkeys remove <id>      # 4 or more characters of the id
 sudo approverd push                      # devices that get notifications
 sudo approverd push test                 # send each one a test
 sudo approverd push remove <n>           # stop notifying one (number from the list)
+sudo approverd log                       # the last 20 activity entries
+sudo approverd log 100                   # or more
 ```
 
 A device that deletes the app or turns notifications off is dropped by itself
@@ -199,5 +209,10 @@ unanswered request is denied.
   means every device turns notifications on again.
 - Turning on notifications needs a passkey signature, so a visitor on the
   tailnet can't add their own device.
+- Opening Activity needs a passkey signature too. It sets an HttpOnly,
+  SameSite=Strict cookie for 15 minutes; sessions live only in approverd's
+  memory, so a restart signs everyone out. The log itself is
+  `/var/lib/private/approver/activity.jsonl` (last 1000 entries, readable only
+  by the service), and failed signatures are logged as well.
 - The local API on 127.0.0.1:7070 accepts requests from any local user, so
   any of them can send you a push. Approving still needs your passkey.

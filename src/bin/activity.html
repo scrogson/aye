@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Activity</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" href="/icon-180.png">
+<link rel="icon" href="/icon-192.png">
+<link rel="stylesheet" href="/ui.css">
+</head>
+<body class="tabbed">
+<svg class="sprite" aria-hidden="true">
+  <symbol id="i-faceid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1M9 16.2c1.8 1.4 4.2 1.4 6 0"/></g></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" d="M6.5 6.5l11 11M17.5 6.5l-11 11"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></g></symbol>
+  <symbol id="i-alert" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.5l9 16H3z"/><path d="M12 10v4M12 17v.01"/></g></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15z"/><path d="M10 20.5a2 2 0 0 0 4 0"/></g></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2M14 9l2 2"/></g></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><rect x="4.5" y="10.5" width="15" height="10" rx="2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/></g></symbol>
+</svg>
+<main class="screen" id="app">
+  <div class="body"><div class="result"><div class="waiting"><span class="spin"></span>Loading…</div></div></div>
+</main>
+<!--tabs-->
+<script>
+const app = document.getElementById("app");
+const SVG = "http://www.w3.org/2000/svg";
+let login = null;   // { id, options }, fetched ahead of the tap
+let busy = false;
+let timer = null;
+let skew = 0;       // phone clock minus the machine's, in seconds
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props || {})) {
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el[k] = v;
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : String(kid)); // text, never HTML
+  }
+  return el;
+}
+function icon(id) {
+  const s = document.createElementNS(SVG, "svg");
+  const u = document.createElementNS(SVG, "use");
+  u.setAttribute("href", "#" + id);
+  s.append(u);
+  return s;
+}
+function render(body, actions) {
+  app.replaceChildren(h("div", { class: "body" }, body), actions || []);
+}
+
+const KIND = { claude: "Claude Code", sudo: "sudo" };
+// event -> [title, icon, tone]
+const EVENTS = {
+  approved: ["Approved", "i-check", "ok"],
+  denied: ["Denied", "i-x", "bad"],
+  expired: ["No answer", "i-clock", ""],
+  withdrawn: ["Cancelled on the machine", "i-x", ""],
+  bad_signature: ["Signature rejected", "i-alert", "bad"],
+  device_added: ["Notifications turned on", "i-bell", ""],
+  device_removed: ["Device removed", "i-bell", ""],
+  device_gone: ["Device stopped taking notifications", "i-bell", "bad"],
+  push_failed: ["Notification failed", "i-alert", "bad"],
+  passkey_added: ["Passkey added", "i-key", ""],
+  passkey_removed: ["Passkey removed", "i-key", ""],
+  registration_opened: ["Registration opened", "i-key", ""],
+  registration_closed: ["Registration closed", "i-key", ""],
+  signed_in: ["Opened activity", "i-lock", ""],
+};
+
+const clock = t => new Date((t + skew) * 1000);
+const hhmm = t => clock(t).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function dayLabel(t) {
+  const d = clock(t), today = new Date();
+  const start = x => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const days = Math.round((start(today) - start(d)) / 86400000);
+  if (days === 0) return "Today";
+  if (days === 1) return "Yesterday";
+  return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+}
+const left = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")} left`;
+
+// ---------- locked ----------
+
+async function loadLogin() {
+  login = null;
+  try {
+    const r = await fetch("/login/challenge", { method: "POST" });
+    if (r.status === 409) return "nokeys";
+    if (!r.ok) return "error";
+    const d = await r.json();
+    login = { id: d.id, options: PublicKeyCredential.parseRequestOptionsFromJSON(d.options.publicKey) };
+    return "ok";
+  } catch { return "error"; }
+}
+
+function showLocked(error) {
+  stop();
+  const unlock = h("button", { class: "btn primary", type: "button", onclick: unlock_ }, icon("i-faceid"), "Unlock with Face ID");
+  unlock.disabled = !login;
+  render(h("div", { class: "result" },
+    h("div", { class: "badge idle" }, icon("i-lock")),
+    h("h1", null, "Activity is locked"),
+    h("p", null, "It shows the commands that asked for approval, so it opens with your passkey. It stays unlocked for 15 minutes."),
+    error && h("p", { class: "error" }, error)),
+    h("div", { class: "actions one" }, unlock));
+}
+
+async function unlock_() {
+  if (busy || !login) return;
+  busy = true;
+  app.querySelector(".actions").replaceWith(h("div", { class: "actions one" }, h("div", { class: "waiting" }, h("span", { class: "spin" }), "Confirm with Face ID…")));
+  let cred;
+  try {
+    cred = await navigator.credentials.get({ publicKey: login.options });
+  } catch {
+    busy = false;
+    return showLocked("Face ID was cancelled or found no passkey for this machine.");
+  }
+  let r;
+  try {
+    r = await fetch("/activity/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: login.id, credential: cred.toJSON() }),
+    });
+  } catch { r = { ok: false, status: 0 }; }
+  busy = false;
+  if (r.ok) return refresh();
+  const why = r.status === 401 ? "That passkey isn't registered here." : r.status === 0 ? "Couldn't reach the machine. Check Tailscale." : "It didn't go through.";
+  showLocked(why + " Try again.");
+  if (await loadLogin() === "ok") showLocked(why + " Try again.");
+}
+
+// ---------- unlocked ----------
+
+function waitingItem(w) {
+  return h("li", { class: "waiting" }, h("a", { class: "wait", href: `/approve/${w.id}` },
+    h("div", { class: "t" }, "Waiting for you ", h("span", { class: "k" }, `· ${KIND[w.kind] || w.kind}`)),
+    h("div", { class: "c" }, w.command),
+    h("div", { class: "m" }, [w.user, left(w.expires_in), "Tap to answer"].filter(Boolean).join(" · "))));
+}
+
+function entryItem(e) {
+  const [title, ic, tone] = EVENTS[e.event] || [e.event, "i-alert", ""];
+  const meta = [hhmm(e.at), e.user, e.detail].filter(Boolean).join(" · ");
+  return h("li", null,
+    h("div", { class: `ic ${tone}` }, icon(ic)),
+    h("div", null,
+      h("div", { class: "t" }, title, e.kind && h("span", { class: "k" }, ` · ${KIND[e.kind] || e.kind}`)),
+      e.command && h("div", { class: "c" }, e.command),
+      h("div", { class: "m" }, meta)));
+}
+
+function showData(d) {
+  skew = Math.round(Date.now() / 1000) - d.now;
+  const parts = [h("div", { class: "head" }, h("h1", null, "Activity"), h("span", { class: "sub" }, `on ${d.host}`))];
+  if (!d.devices) {
+    parts.push(h("a", { class: "banner", href: "/" }, icon("i-alert"),
+      h("span", null, "No device gets notifications, so requests wait unseen. Turn them on in Notifications.")));
+  }
+  if (d.waiting.length) {
+    parts.push(h("div", { class: "section" }, "Waiting now"), h("ul", { class: "feed" }, d.waiting.map(waitingItem)));
+  }
+  if (!d.entries.length) {
+    parts.push(h("p", { class: "empty" }, "Nothing yet. Requests show up here once something asks for approval."));
+  }
+  let day = null, list = null;
+  for (const e of d.entries) {
+    const label = dayLabel(e.at);
+    if (label !== day) {
+      day = label;
+      list = h("ul", { class: "feed" });
+      parts.push(h("div", { class: "section" }, label), list);
+    }
+    list.append(entryItem(e));
+  }
+  const y = scrollY;
+  render(parts);
+  scrollTo(0, y);
+}
+
+async function refresh() {
+  let r;
+  try { r = await fetch("/activity/data"); } catch { r = null; }
+  if (r && r.status === 401) {
+    showLocked();
+    if (await loadLogin() === "nokeys") return render(h("div", { class: "result" }, h("h1", null, "No passkeys yet"), h("p", null, "Add one on the Passkeys tab first.")));
+    return showLocked();
+  }
+  if (!r || !r.ok) {
+    if (!app.querySelector(".feed, .empty")) {
+      render(h("div", { class: "result" },
+        h("div", { class: "badge bad" }, icon("i-alert")),
+        h("h1", null, "Couldn't reach this machine"),
+        h("p", null, "Check that Tailscale is connected on this device.")));
+    }
+  } else {
+    showData(await r.json());
+  }
+  start();
+}
+
+// Refresh every 5 seconds while the app is on screen.
+function start() { stop(); timer = setTimeout(refresh, 5000); }
+function stop() { clearTimeout(timer); timer = null; }
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stop();
+  else if (!busy && !app.querySelector(".btn.primary")) refresh();
+});
+
+(async () => {
+  if (!window.PublicKeyCredential?.parseRequestOptionsFromJSON) {
+    return render(h("div", { class: "result" },
+      h("div", { class: "badge bad" }, icon("i-alert")),
+      h("h1", null, "This browser can't sign with a passkey"),
+      h("p", null, "Open this in Safari on an up-to-date iPhone, or in a current desktop browser.")));
+  }
+  refresh();
+})();
+</script>
+</body>
+</html>

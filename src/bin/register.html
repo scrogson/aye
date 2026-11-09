@@ -7,7 +7,7 @@
 <title>Add a passkey</title>
 <link rel="stylesheet" href="/ui.css">
 </head>
-<body>
+<body class="tabbed">
 <svg class="sprite" aria-hidden="true">
   <symbol id="i-faceid" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8V5.5A2.5 2.5 0 0 1 5.5 3H8M16 3h2.5A2.5 2.5 0 0 1 21 5.5V8M21 16v2.5a2.5 2.5 0 0 1-2.5 2.5H16M8 21H5.5A2.5 2.5 0 0 1 3 18.5V16"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1M9 16.2c1.8 1.4 4.2 1.4 6 0"/></g></symbol>
   <symbol id="i-check" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" d="M5 12.5l4.5 4.5L19 7.5"/></symbol>
@@ -19,6 +19,7 @@
 <main class="screen" id="app">
   <div class="body"><div class="result"><div class="waiting"><span class="spin"></span>Checking registration…</div></div></div>
 </main>
+<!--tabs-->
 <script>
 const app = document.getElementById("app");
 const SVG = "http://www.w3.org/2000/svg";
@@ -60,8 +61,9 @@ function result(tone, ic, title, text, code) {
 }
 
 function showClosed() {
-  result("idle", "i-closed", "Registration is closed",
-    `To add a passkey, open registration from a terminal on ${status.host}, then reload this page.`,
+  const n = status.passkeys;
+  result("idle", "i-closed", n ? `${plural(n)} on ${status.host}` : `No passkeys on ${status.host} yet`,
+    `To add one, open registration from a terminal on ${status.host}, then reload this page. To see or remove them: sudo approverd passkeys.`,
     "sudo approverd register open");
 }
 
