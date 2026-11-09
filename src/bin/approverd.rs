@@ -122,7 +122,19 @@ fn parse_duration(s: &str) -> Option<Duration> {
 /// Send one command to the running daemon and print its answer.
 async fn control_client(cmd: Value) -> i32 {
     let path = socket_path();
-    let mut stream = match UnixStream::connect(&path).await {
+    // Right after `systemctl restart` the daemon may not have made its socket
+    // yet, so wait a moment for it before giving up.
+    let mut tries = 0;
+    let connected = loop {
+        match UnixStream::connect(&path).await {
+            Err(e) if tries < 30 && matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => {
+                tries += 1;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            r => break r,
+        }
+    };
+    let mut stream = match connected {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
             eprintln!("approverd: permission denied on {path}; run this with sudo");
