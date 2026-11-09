@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
-# Steps 1 and 3 of the plan on desk: approverd behind `tailscale serve`, and a
-# Tailscale-only ntfy. Does not touch PAM or sudoers.
+# Sets up approverd behind `tailscale serve` and a Tailscale-only ntfy on
+# whichever machine you run it on. Does not touch PAM or sudoers.
 #
 # Run as yourself (not root) from a regular terminal outside the Claude app,
-# from the repo root, after `cargo build --release`. Safe to re-run.
+# from the repo root, after `cargo build --release`. Safe to re-run: it keeps
+# existing ntfy users and approverd's token.
+#
+# Settings, all optional:
+#   HOST=name.tailnet.ts.net   default: this machine's Tailscale name
+#   TOPIC=approvals            ntfy topic the pushes go to
+#   PHONE_USER=$USER           ntfy account the phone app signs in with
 set -euo pipefail
-
-HOST=desk.tailnet-name.ts.net
-TOPIC=approvals
-PHONE_USER=alice
 cd "$(dirname "$0")/.."
 
 [[ $EUID -ne 0 ]] || { echo "run as your user, not root (yay refuses root)"; exit 1; }
 [[ -x target/release/approverd ]] || { echo "build first: cargo build --release"; exit 1; }
+command -v jq >/dev/null || { echo "needs jq"; exit 1; }
+
+HOST="${HOST:-$(tailscale status --json 2>/dev/null | jq -r '.Self.DNSName // empty' | sed 's/\.$//')}"
+[[ -n $HOST ]] || { echo "can't find this machine's Tailscale name; is tailscale up? (or set HOST=...)"; exit 1; }
+TOPIC="${TOPIC:-approvals}"
+PHONE_USER="${PHONE_USER:-$USER}"
+echo "Setting up for $HOST (topic $TOPIC, phone user $PHONE_USER)"
 sudo -v
 
 echo "==> ntfy package"
 yay -S --needed --noconfirm ntfysh-bin
 
 echo "==> ntfy config"
-sudo install -m644 deploy/ntfy/server.yml /etc/ntfy/server.yml
+sed "s|@HOST@|$HOST|g" deploy/ntfy/server.yml | sudo install -m644 /dev/stdin /etc/ntfy/server.yml
 sudo install -Dm644 deploy/ntfy/ntfy.service.d/approver.conf /etc/systemd/system/ntfy.service.d/approver.conf
 sudo systemctl daemon-reload
 sudo systemctl enable ntfy
@@ -44,20 +53,17 @@ ntfy_as access "$PHONE_USER" "$TOPIC" read-only
 echo "==> approverd"
 sudo install -m755 target/release/approverd /usr/local/bin/approverd
 sudo install -d -m700 /etc/approver
-if ! sudo grep -q '^NTFY_TOKEN=tk_' /etc/approver/approverd.env 2>/dev/null; then
-  token=$(ntfy_as token add --label approverd approver | grep -o 'tk_[A-Za-z0-9]*')
-  sudo sh -c "umask 077; printf '%s\n' \
-    'APPROVER_HOST=$HOST' \
-    'NTFY_URL=http://127.0.0.1:2586/$TOPIC' \
-    'NTFY_TOKEN=$token' > /etc/approver/approverd.env"
-  unset token
-fi
+token=$(sudo sed -n 's/^NTFY_TOKEN=\(tk_[A-Za-z0-9]*\)$/\1/p' /etc/approver/approverd.env 2>/dev/null || true)
+[[ -n $token ]] || token=$(ntfy_as token add --label approverd approver | grep -o 'tk_[A-Za-z0-9]*')
+printf '%s\n' "APPROVER_HOST=$HOST" "NTFY_URL=http://127.0.0.1:2586/$TOPIC" "NTFY_TOKEN=$token" \
+  | sudo install -m600 /dev/stdin /etc/approver/approverd.env
+unset token
 sudo install -m644 deploy/approverd.service /etc/systemd/system/approverd.service
 sudo systemctl daemon-reload
 sudo systemctl enable approverd
 sudo systemctl restart approverd
-sleep 1
-systemctl --no-pager --lines=3 status approverd | tail -4
+for _ in $(seq 20); do sudo approverd status >/dev/null 2>&1 && break; sleep 0.5; done
+sudo approverd status
 
 echo "==> tailscale serve"
 echo "(if this prints a login.tailscale.com link, open it to enable Serve/HTTPS for the tailnet; it continues once enabled)"
@@ -67,4 +73,4 @@ tailscale serve status
 
 echo
 echo "Done. Approval pages: https://$HOST/   ntfy: https://$HOST:8443/$TOPIC"
-echo "Next: phone on Tailscale, then deploy/register.sh open (step 2)."
+echo "To add a phone's passkey: sudo approverd register open, then open https://$HOST/register on it."

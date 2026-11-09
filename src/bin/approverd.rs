@@ -7,12 +7,32 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{sync::{oneshot, Mutex}, time::Instant};
+use std::{collections::HashMap, os::unix::fs::{MetadataExt, PermissionsExt}, sync::Arc, time::Duration};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+    sync::{oneshot, Mutex},
+    time::Instant,
+};
 use webauthn_rs::prelude::*;
 
 /// How long a request waits for an answer before it counts as a deny.
 const TIMEOUT: Duration = Duration::from_secs(60);
+/// How long `approverd register open` keeps registration open by default.
+const REGISTER_FOR: Duration = Duration::from_secs(10 * 60);
+
+const USAGE: &str = "\
+usage:
+  approverd                          run the daemon
+  approverd status                   show address, passkeys and registration
+  approverd register open [--for 10m]
+                                     let devices add a passkey (closes itself)
+  approverd register close
+  approverd passkeys                 list registered passkeys
+  approverd passkeys remove <id>     remove one (an id prefix is enough)
+
+The commands talk to the running daemon over its control socket, which only
+root can open: run them with sudo.";
 
 struct Pending {
     user: String,
@@ -34,7 +54,14 @@ struct App {
     passkeys: Mutex<Vec<Passkey>>,
     reg: Mutex<Option<PasskeyRegistration>>,
     pending: Mutex<HashMap<Uuid, Pending>>,
-    allow_register: bool,
+    /// Registration is open until this moment; None means closed.
+    register_until: Mutex<Option<Instant>>,
+}
+
+impl App {
+    async fn registration_open(&self) -> bool {
+        self.register_until.lock().await.is_some_and(|t| t > Instant::now())
+    }
 }
 
 type S = State<Arc<App>>;
@@ -43,8 +70,87 @@ fn env(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("{key} must be set"))
 }
 
+/// The daemon's control socket, in the runtime directory systemd makes for it.
+fn socket_path() -> String {
+    std::env::var("APPROVER_SOCKET").unwrap_or_else(|_| {
+        let dir = std::env::var("RUNTIME_DIRECTORY").unwrap_or_else(|_| "/run/approver".into());
+        format!("{dir}/control.sock")
+    })
+}
+
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let cmd = match args.as_slice() {
+        [] | ["serve"] => return serve().await,
+        ["status"] => json!({ "cmd": "status" }),
+        ["register", "open"] => json!({ "cmd": "register_open", "seconds": REGISTER_FOR.as_secs() }),
+        ["register", "open", "--for", d] => match parse_duration(d) {
+            Some(d) => json!({ "cmd": "register_open", "seconds": d.as_secs() }),
+            None => exit_usage(&format!("can't read {d:?} as a duration; try 10m, 90s or 1h")),
+        },
+        ["register", "close"] => json!({ "cmd": "register_close" }),
+        ["passkeys"] | ["passkeys", "list"] => json!({ "cmd": "passkeys" }),
+        ["passkeys", "remove", id] => json!({ "cmd": "passkeys_remove", "id": id }),
+        ["-h" | "--help" | "help"] => {
+            println!("{USAGE}");
+            return;
+        }
+        _ => exit_usage("unknown command"),
+    };
+    std::process::exit(control_client(cmd).await);
+}
+
+fn exit_usage(why: &str) -> ! {
+    eprintln!("approverd: {why}\n\n{USAGE}");
+    std::process::exit(2);
+}
+
+fn parse_duration(s: &str) -> Option<Duration> {
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let n: u64 = n.parse().ok()?;
+    let secs = match unit {
+        "s" => n,
+        "" | "m" => n * 60,
+        "h" => n * 3600,
+        _ => return None,
+    };
+    (secs > 0 && secs <= 24 * 3600).then(|| Duration::from_secs(secs))
+}
+
+/// Send one command to the running daemon and print its answer.
+async fn control_client(cmd: Value) -> i32 {
+    let path = socket_path();
+    let mut stream = match UnixStream::connect(&path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("approverd: permission denied on {path}; run this with sudo");
+            return 1;
+        }
+        Err(e) => {
+            eprintln!("approverd: can't reach the daemon at {path}: {e}\nIs it running? systemctl status approverd");
+            return 1;
+        }
+    };
+    if stream.write_all(format!("{cmd}\n").as_bytes()).await.is_err() {
+        eprintln!("approverd: the daemon closed the connection");
+        return 1;
+    }
+    let mut line = String::new();
+    let _ = BufReader::new(stream).read_line(&mut line).await;
+    let reply: Value = serde_json::from_str(&line).unwrap_or_else(|_| json!({ "ok": false, "text": "no answer from the daemon" }));
+    let text = reply["text"].as_str().unwrap_or_default();
+    if reply["ok"].as_bool() == Some(true) {
+        println!("{text}");
+        0
+    } else {
+        eprintln!("approverd: {text}");
+        1
+    }
+}
+
+async fn serve() {
     // This machine's Tailscale name, e.g. desk.tailnet-name.ts.net. It is both the
     // WebAuthn relying party id and the origin the approval pages are served on.
     let rp_id = env("APPROVER_HOST");
@@ -60,12 +166,7 @@ async fn main() {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let allow_register = std::env::var("ALLOW_REGISTER").is_ok_and(|v| v == "1");
-    eprintln!(
-        "approverd: {origin}, {} passkey(s), registration {}",
-        passkeys.len(),
-        if allow_register { "OPEN" } else { "closed" }
-    );
+    eprintln!("approverd: {origin}, {} passkey(s)", passkeys.len());
     let app = Arc::new(App {
         webauthn,
         host: rp_id.split('.').next().unwrap_or(&rp_id).to_string(),
@@ -77,8 +178,9 @@ async fn main() {
         passkeys: Mutex::new(passkeys),
         reg: Mutex::new(None),
         pending: Mutex::new(HashMap::new()),
-        allow_register,
+        register_until: Mutex::new(None),
     });
+    let control = tokio::spawn(control_server(app.clone(), socket_path()));
 
     let local = Router::new()
         .route("/local/request", post(request))
@@ -99,10 +201,111 @@ async fn main() {
     let pages_addr = std::env::var("PAGES_ADDR").unwrap_or_else(|_| "127.0.0.1:7071".into());
     let l = tokio::net::TcpListener::bind(&local_addr).await.unwrap();
     let p = tokio::net::TcpListener::bind(&pages_addr).await.unwrap();
-    tokio::join!(
-        async { axum::serve(l, local).await.unwrap() },
-        async { axum::serve(p, public).await.unwrap() }
-    );
+    tokio::select! {
+        r = axum::serve(l, local) => r.unwrap(),
+        r = axum::serve(p, public) => r.unwrap(),
+        r = control => r.unwrap(),
+    }
+}
+
+// ---------- control socket: one JSON line in, one JSON line out ----------
+
+async fn control_server(s: Arc<App>, path: String) {
+    let _ = std::fs::remove_file(&path); // left over from a crash
+    let listener = UnixListener::bind(&path).unwrap_or_else(|e| panic!("bind {path}: {e}"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let owner = std::fs::metadata(&path).unwrap().uid();
+    loop {
+        let Ok((stream, _)) = listener.accept().await else { continue };
+        // The file mode already keeps others out; this also refuses anyone
+        // who got hold of the socket some other way.
+        let uid = stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
+        let s = s.clone();
+        tokio::spawn(async move {
+            let (r, mut w) = stream.into_split();
+            let reply = if uid != 0 && uid != owner {
+                json!({ "ok": false, "text": "only root can control approverd; run this with sudo" })
+            } else {
+                let mut line = String::new();
+                let _ = BufReader::new(r).read_line(&mut line).await;
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(cmd) => control_command(&s, &cmd).await,
+                    Err(_) => json!({ "ok": false, "text": "unreadable command" }),
+                }
+            };
+            let _ = w.write_all(format!("{reply}\n").as_bytes()).await;
+        });
+    }
+}
+
+fn cred_id(pk: &Passkey) -> String {
+    serde_json::to_value(pk.cred_id()).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default()
+}
+
+fn mins_secs(d: Duration) -> String {
+    format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60)
+}
+
+async fn control_command(s: &App, cmd: &Value) -> Value {
+    let ok = |text: String| json!({ "ok": true, "text": text });
+    let fail = |text: String| json!({ "ok": false, "text": text });
+    match cmd["cmd"].as_str().unwrap_or_default() {
+        "status" => {
+            let keys = s.passkeys.lock().await.len();
+            let reg = match *s.register_until.lock().await {
+                Some(t) if t > Instant::now() => format!("open, closes in {}", mins_secs(t - Instant::now())),
+                _ => "closed".into(),
+            };
+            let waiting = s.pending.lock().await.len();
+            ok(format!(
+                "address       {}\npasskeys      {keys}\nregistration  {reg}\nwaiting       {waiting} request(s)",
+                s.origin
+            ))
+        }
+        "register_open" => {
+            let secs = cmd["seconds"].as_u64().unwrap_or(REGISTER_FOR.as_secs()).clamp(1, 24 * 3600);
+            *s.register_until.lock().await = Some(Instant::now() + Duration::from_secs(secs));
+            eprintln!("approverd: registration open for {secs}s");
+            ok(format!(
+                "Registration is open for {}. On the device, open {}/register\nIt closes by itself; to close it now: sudo approverd register close",
+                mins_secs(Duration::from_secs(secs)),
+                s.origin
+            ))
+        }
+        "register_close" => {
+            *s.register_until.lock().await = None;
+            *s.reg.lock().await = None;
+            eprintln!("approverd: registration closed");
+            ok("Registration is closed.".into())
+        }
+        "passkeys" => {
+            let keys = s.passkeys.lock().await;
+            if keys.is_empty() {
+                return ok("No passkeys registered. Add one with: sudo approverd register open".into());
+            }
+            let lines: Vec<String> = keys.iter().enumerate().map(|(i, k)| format!("{:>2}  {}", i + 1, cred_id(k))).collect();
+            ok(lines.join("\n"))
+        }
+        "passkeys_remove" => {
+            let want = cmd["id"].as_str().unwrap_or_default();
+            if want.len() < 4 {
+                return fail("give at least 4 characters of the passkey id (see: approverd passkeys)".into());
+            }
+            let mut keys = s.passkeys.lock().await;
+            let hits: Vec<usize> = keys.iter().enumerate().filter(|(_, k)| cred_id(k).starts_with(want)).map(|(i, _)| i).collect();
+            match hits.as_slice() {
+                [i] => {
+                    let gone = cred_id(&keys.remove(*i));
+                    save_passkeys(s, &keys).await;
+                    eprintln!("approverd: removed passkey {gone}");
+                    ok(format!("Removed {gone}. {} passkey(s) left.", keys.len()))
+                }
+                [] => fail(format!("no passkey id starts with {want:?}")),
+                _ => fail(format!("{} passkeys start with {want:?}; give more of the id", hits.len())),
+            }
+        }
+        other => fail(format!("unknown command {other:?}")),
+    }
 }
 
 /// A page or stylesheet: never cached, never framed (so the Approve button
@@ -235,11 +438,11 @@ async fn verify(State(s): S, Path(id): Path<Uuid>, Json(v): Json<Verify>) -> Sta
     StatusCode::OK
 }
 
-// ---------- one-time registration (run with ALLOW_REGISTER=1, then restart without) ----------
+// ---------- registration (only while `approverd register open` is in effect) ----------
 
 async fn reg_status(State(s): S) -> Json<Value> {
     Json(json!({
-        "open": s.allow_register,
+        "open": s.registration_open().await,
         "passkeys": s.passkeys.lock().await.len(),
         "host": s.host,
         "rp_id": s.rp_id,
@@ -247,7 +450,7 @@ async fn reg_status(State(s): S) -> Json<Value> {
 }
 
 async fn reg_start(State(s): S) -> Result<Json<CreationChallengeResponse>, StatusCode> {
-    if !s.allow_register { return Err(StatusCode::FORBIDDEN); }
+    if !s.registration_open().await { return Err(StatusCode::FORBIDDEN); }
     let exclude: Vec<_> = s.passkeys.lock().await.iter().map(|k| k.cred_id().clone()).collect();
     let (ccr, reg) = s.webauthn
         .start_passkey_registration(Uuid::new_v4(), "approver", "Approver", Some(exclude))
@@ -257,7 +460,7 @@ async fn reg_start(State(s): S) -> Result<Json<CreationChallengeResponse>, Statu
 }
 
 async fn reg_finish(State(s): S, Json(c): Json<RegisterPublicKeyCredential>) -> StatusCode {
-    if !s.allow_register { return StatusCode::FORBIDDEN; }
+    if !s.registration_open().await { return StatusCode::FORBIDDEN; }
     let Some(reg) = s.reg.lock().await.take() else { return StatusCode::BAD_REQUEST };
     let Ok(pk) = s.webauthn.finish_passkey_registration(&c, &reg) else { return StatusCode::UNAUTHORIZED };
     let mut keys = s.passkeys.lock().await;

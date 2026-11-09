@@ -62,7 +62,7 @@ function result(tone, ic, title, text, code) {
 function showClosed() {
   result("idle", "i-closed", "Registration is closed",
     `To add a passkey, open registration from a terminal on ${status.host}, then reload this page.`,
-    "deploy/register.sh open");
+    "sudo approverd register open");
 }
 
 function showOpen(error) {
@@ -116,8 +116,8 @@ async function add_() {
   busy = false;
   if (r.ok) {
     return result("ok", "i-check", "Passkey added",
-      `${status.host} now has ${plural(status.passkeys + 1)}. When you're done adding them, close registration on ${status.host}:`,
-      "deploy/register.sh close");
+      `${status.host} now has ${plural(status.passkeys + 1)}. Registration closes by itself in a few minutes, or close it now on ${status.host}:`,
+      "sudo approverd register close");
   }
   if (r.status === 403) { status.open = false; return showClosed(); }
   options = null;
