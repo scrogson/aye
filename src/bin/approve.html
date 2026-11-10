@@ -26,7 +26,7 @@ const app = document.getElementById("app");
 const SVG = "http://www.w3.org/2000/svg";
 
 let req = null;        // { host, user, kind, command }
-let options = null;    // parsed WebAuthn request options for the current challenge
+let options = null;    // { approve, deny }: parsed WebAuthn request options for the current challenges
 let deadline = 0;      // ms timestamp, from the daemon's seconds-left
 let total = 60;
 let ticker = null;
@@ -156,7 +156,12 @@ async function loadChallenge() {
   const d = await r.json();
   req = { host: d.host, user: d.user, kind: d.kind, command: d.command };
   deadline = Date.now() + d.expires_in * 1000;
-  options = PublicKeyCredential.parseRequestOptionsFromJSON(d.options.publicKey);
+  // One challenge for each answer; the daemon checks the signature against
+  // the one for the answer it is given.
+  options = {
+    approve: PublicKeyCredential.parseRequestOptionsFromJSON(d.approve.publicKey),
+    deny: PublicKeyCredential.parseRequestOptionsFromJSON(d.deny.publicKey),
+  };
   return "ok";
 }
 
@@ -169,7 +174,7 @@ async function decide(approve) {
 
   let cred;
   try {
-    cred = await navigator.credentials.get({ publicKey: options });
+    cred = await navigator.credentials.get({ publicKey: approve ? options.approve : options.deny });
   } catch {
     busy = false;
     if (done) return;

@@ -250,6 +250,7 @@ dependencies = [
  "ct-codecs",
  "ece",
  "jwt-simple",
+ "libc",
  "openssl",
  "qrcode",
  "reqwest",

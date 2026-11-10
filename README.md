@@ -175,7 +175,10 @@ keep these in mind:
 - **Keep what PAM runs owned by root and not writable by you.** `pam_exec`
   lets sudo through when the program exits 0, so if your user could replace
   `/usr/local/bin/aye`, anything running as you could get root. The same goes
-  for modules: `pam_aye.so` is in `/usr/local/lib/pam`, owned by root, but
+  for modules: `pam_aye.so` is in `/usr/local/lib/pam`, owned by root
+  (`deploy/macos/pam.sh` refuses to install if any directory above it or
+  above `aye` is yours, as `/usr/local/lib` is under Homebrew on an Intel
+  Mac), but
   Homebrew's `pam_u2f` and `pam_reattach` aren't (see
   [Touch ID and a YubiKey](#touch-id-and-a-yubikey)).
 - **Test before you close the door.** Keep a root shell (`sudo -s`) open,
@@ -400,7 +403,15 @@ root the next time you use sudo.
 - The pages are reachable only on the tailnet, through `tailscale serve`.
   Don't turn on Funnel for them.
 - Every answer, Approve or Deny, needs a passkey signature from a registered
-  device. Each challenge works once and only until the request expires.
+  device. Each challenge works once and only until the request expires, and
+  Approve and Deny sign different challenges, so one can't be passed off as
+  the other.
+- The pages answer only to this machine's Tailscale name (or the local
+  address), so another site can't reach them through a browser on this
+  machine by pointing its own name at 127.0.0.1.
+- A Claude Code call too long to show whole (over 4000 characters) isn't
+  sent to the phone: Claude asks at the desk instead, since an approval
+  covers the whole call.
 - A notification says only "sudo on <machine>" or "Claude Code on
   <machine>", and a link back to this machine. The command is shown only on
   the page, after it loads over the tailnet.
@@ -426,8 +437,10 @@ root the next time you use sudo.
   which on Linux isn't there at all while ayed is stopped: nothing else on
   the machine can answer in ayed's place. The path is fixed in `aye`.
 - Any local user can ask over that socket, so any of them can send you a
-  push. Approving still needs your passkey. A request is at most 64 KB, and
-  one user can have eight waiting.
+  push. Approving still needs your passkey. The page shows who really asked
+  (the socket says, not the request), a request is at most 64 KB, and one
+  user can have eight waiting and make 30 a minute.
+- Removing a passkey signs out any Activity session it opened.
 
 ## License
 

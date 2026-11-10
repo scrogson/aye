@@ -44,6 +44,25 @@ with_line() {
     }' "$src"
 }
 
+# sudo loads the module and runs aye as root, so every directory on the way
+# to them has to be root's and closed to everyone else: whoever can write to
+# one can swap what's inside it. Homebrew on an Intel Mac owns /usr/local/lib.
+root_only() {
+  local d=$1 st
+  while :; do
+    st=$(stat -f '%u %Lp' "$d")
+    if [[ ${st%% *} != 0 || $(( 8#${st##* } & 8#022 )) != 0 ]]; then
+      echo "$d isn't root's alone (owner id ${st%% *}, mode ${st##* }), so anything running as you"
+      echo "could replace what sudo loads from it and become root. Not installing. To fix:"
+      echo "  sudo chown root:wheel $d && sudo chmod go-w $d"
+      echo "(Homebrew will then need sudo to put things there.)"
+      return 1
+    fi
+    [[ $d == / ]] && return 0
+    d=$(dirname "$d")
+  done
+}
+
 install_parts() {
   [[ -x target/release/aye ]] || { echo "build first: cargo build --release"; exit 1; }
   sudo ayed status >/dev/null 2>&1 || { echo "ayed isn't running; set it up first (deploy/macos/setup.sh)"; exit 1; }
@@ -52,6 +71,8 @@ install_parts() {
   sudo install -d -m755 -o root -g wheel /usr/local/bin /usr/local/lib/pam
   sudo install -m755 -o root -g wheel target/release/aye /usr/local/bin/aye
   sudo install -m444 -o root -g wheel target/release/pam_aye.so "$MODULE"
+  root_only /usr/local/bin
+  root_only "$(dirname "$MODULE")"
 }
 
 case "${1:-}" in

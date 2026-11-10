@@ -24,6 +24,8 @@ jobs:
       - run: cargo build --locked
       - run: cargo test --locked
       - run: cargo clippy --locked -- -D warnings
+      - name: Check the scripts parse
+        run: for f in deploy/*.sh deploy/macos/*.sh; do bash -n "$f"; done
       - name: Build the PAM module
         if: runner.os == 'macOS'
         run: cc -bundle -Wall -Wextra -Werror -o pam_aye.so pam/pam_aye.c -lpam

@@ -26,12 +26,23 @@ fn parent_cmdline() -> String {
         .map(|p| {
             p.cmd()
                 .iter()
-                .map(|s| s.to_string_lossy())
+                .map(|s| quote(&s.to_string_lossy()))
                 .collect::<Vec<_>>()
                 .join(" ")
         })
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "unknown command".into())
+}
+
+/// One argument as you'd type it in a shell, so `sudo sh -c 'a; b'` isn't
+/// shown as `sudo sh -c a; b`.
+fn quote(arg: &str) -> String {
+    let plain = |c: char| c.is_ascii_alphanumeric() || "_-./=:,+@%".contains(c);
+    if !arg.is_empty() && arg.chars().all(plain) {
+        arg.to_string()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
 }
 
 #[derive(PartialEq)]
@@ -150,8 +161,10 @@ fn pam(user: String) -> ! {
 }
 
 /// What the phone shows for a Claude Code tool call: the command itself for
-/// Bash, the file or URL for the common tools, the raw input otherwise.
-fn describe(v: &Value) -> String {
+/// Bash, the file or URL for the common tools, the raw input otherwise. None
+/// if it is too long to show whole: an approval covers the whole call, so a
+/// call that would be cut goes to Claude's own prompt instead.
+fn describe(v: &Value) -> Option<String> {
     let tool = v["tool_name"].as_str().unwrap_or("?");
     let input = &v["tool_input"];
     let field = |k: &str| input[k].as_str().map(str::to_string);
@@ -166,7 +179,7 @@ fn describe(v: &Value) -> String {
         _ => None,
     }
     .unwrap_or_else(|| format!("{tool} {input}"));
-    let mut text = match v["cwd"].as_str() {
+    let text = match v["cwd"].as_str() {
         Some(cwd) => {
             let home = std::env::var("HOME").unwrap_or_default();
             let cwd = match cwd.strip_prefix(&home) {
@@ -177,10 +190,7 @@ fn describe(v: &Value) -> String {
         }
         None => what,
     };
-    if text.chars().count() > 4000 {
-        text = text.chars().take(4000).collect::<String>() + "\n…";
-    }
-    text
+    (text.chars().count() <= 4000).then_some(text)
 }
 
 /// Claude Code hook mode. Meant for PermissionRequest, which only fires when
@@ -209,10 +219,11 @@ fn hook(only_if: Option<String>) {
         .unwrap_or("PermissionRequest")
         .to_string();
 
+    let Some(command) = describe(&v) else { return };
     let answer = ask(&json!({
         "user": std::env::var("USER").unwrap_or_default(),
         "kind": "claude",
-        "command": describe(&v),
+        "command": command,
     }));
     let approved = match answer {
         Ok(Answer::Approved) => true,
@@ -280,5 +291,26 @@ fn main() {
             eprintln!("{USAGE}");
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quotes_like_a_shell() {
+        assert_eq!(quote("apt"), "apt");
+        assert_eq!(quote("--config=/etc/x.conf"), "--config=/etc/x.conf");
+        assert_eq!(quote("a; b"), "'a; b'");
+        assert_eq!(quote(""), "''");
+        assert_eq!(quote("it's"), r"'it'\''s'");
+    }
+
+    #[test]
+    fn a_long_call_is_not_cut() {
+        let call = |cmd: &str| json!({ "tool_name": "Bash", "tool_input": { "command": cmd } });
+        assert_eq!(describe(&call("ls")).as_deref(), Some("ls"));
+        assert_eq!(describe(&call(&"x".repeat(4001))), None);
     }
 }
