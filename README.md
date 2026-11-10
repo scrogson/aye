@@ -13,7 +13,7 @@ only works for this machine. No answer in 60 seconds counts as no answer: sudo
 falls back to your password, and Claude Code shows its own prompt.
 
 ```
-sudo / Claude Code ──► aye ──► ayed (127.0.0.1:7070) ──► Web Push ──► phone
+sudo / Claude Code ──► aye ──► ayed (/run/aye/ask.sock) ──► Web Push ──► phone
                                  ▲                                      │
                                  └────── signed answer (Face ID) ◄──────┘
                                pages on https://<machine>.<tailnet>.ts.net
@@ -73,14 +73,17 @@ app's terminal.
    deploy/setup.sh
    ```
 
-3. Add the phone's passkey. Registration closes by itself after 10 minutes:
+3. Add the phone's passkey:
 
    ```bash
    sudo aye register open
    ```
 
-   Then open `https://<machine>.<tailnet>.ts.net/register` on the phone and
-   tap **Add passkey**. Add a second device (or a YubiKey) as a backup.
+   It prints a QR code and a six-digit code. Scan the QR code with the
+   phone's camera and tap **Add passkey**; or open
+   `https://<machine>.<tailnet>.ts.net/register` and type the six digits.
+   Registration closes once a passkey is added, or by itself after 10
+   minutes. Run it again to add a second device (or a YubiKey) as a backup.
 
 4. Turn on notifications. Open `https://<machine>.<tailnet>.ts.net/` in
    Safari, tap Share › **Add to Home Screen**, then open **Aye** from the
@@ -300,7 +303,7 @@ deploy/macos/setup.sh
 
 That makes a hidden `_aye` user and a launchd daemon, `local.ayed`,
 keeping its state in `/var/db/aye` and its log in
-`/var/log/ayed.log`. Then add the passkey and the Home Screen app as in
+`/var/log/ayed.log` (and its socket for `aye` in `/var/db/aye-ask`). Then add the passkey and the Home Screen app as in
 steps 3 and 4 above. The `ayed` commands are the same; to check on the
 service itself: `sudo launchctl print system/local.ayed`.
 
@@ -414,8 +417,17 @@ root the next time you use sudo.
   `/var/lib/private/aye/activity.jsonl` (`/var/db/aye` on a Mac;
   last 1000 entries, readable only by the service), and failed signatures are
   logged as well.
-- The local API on 127.0.0.1:7070 accepts requests from any local user, so
-  any of them can send you a push. Approving still needs your passkey.
+- Adding a passkey needs the six-digit code `sudo aye register open` prints
+  (the QR code carries it), so reaching the page while registration is open
+  isn't enough. Each opening adds one passkey, and five wrong codes close it.
+- `aye` asks ayed over a Unix socket, `/run/aye/ask.sock`
+  (`/var/db/aye-ask/ask.sock` on a Mac). sudo lets you through on what comes
+  back from it, so it is in a directory only the daemon's user can write to,
+  which on Linux isn't there at all while ayed is stopped: nothing else on
+  the machine can answer in ayed's place. The path is fixed in `aye`.
+- Any local user can ask over that socket, so any of them can send you a
+  push. Approving still needs your passkey. A request is at most 64 KB, and
+  one user can have eight waiting.
 
 ## License
 

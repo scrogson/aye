@@ -1,7 +1,12 @@
 use serde_json::{Value, json};
 use std::{
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, IsTerminal, Read, Write},
+    io::{self, BufRead, BufReader, IsTerminal, Read, Write},
+    os::unix::{
+        fs::{FileTypeExt, MetadataExt},
+        net::UnixStream,
+    },
+    path::Path,
     time::Duration,
 };
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
@@ -33,26 +38,62 @@ fn parent_cmdline() -> String {
 enum Answer {
     Approved,
     Denied,
-    /// Nobody answered in time (or the daemon said something we don't know).
+    /// Nobody answered in time.
     Unanswered,
 }
 
-/// Ask ayed and wait for a signed answer from the phone.
-fn ask(request: &Value) -> Result<Answer, reqwest::Error> {
-    let v: Value = reqwest::blocking::Client::builder()
-        .connect_timeout(Duration::from_secs(2))
-        .timeout(Duration::from_secs(70))
-        .build()?
-        .post("http://127.0.0.1:7070/local/ask")
-        .json(request)
-        .send()?
-        .error_for_status()?
-        .json()?;
-    Ok(match v["answer"].as_str() {
-        Some("approved") => Answer::Approved,
-        Some("denied") => Answer::Denied,
-        _ => Answer::Unanswered,
-    })
+/// ayed's socket for approvals; src/bin/ayed.rs has the same path. It is
+/// fixed, with no setting to change it, because sudo lets you through on what
+/// comes back from it: /run/aye is made by systemd for the daemon and is gone
+/// while it's stopped, and /var/db/aye-ask belongs to the daemon's user, so
+/// nothing else on the machine can put a socket there.
+const ASK_SOCKET: &str = if cfg!(target_os = "macos") {
+    "/var/db/aye-ask/ask.sock"
+} else {
+    "/run/aye/ask.sock"
+};
+
+fn ask_socket() -> String {
+    // A debug build can be pointed at a test copy of ayed.
+    #[cfg(debug_assertions)]
+    if let Ok(path) = std::env::var("AYE_ASK_SOCKET") {
+        return path;
+    }
+    ASK_SOCKET.into()
+}
+
+/// A socket, owned by root or by whoever owns its directory, in a directory
+/// nobody else can write to. Catches a directory set up wrongly, where
+/// another user could have swapped the socket for their own.
+fn trusted(path: &Path) -> io::Result<bool> {
+    let sock = std::fs::metadata(path)?;
+    let dir = std::fs::metadata(path.parent().unwrap_or(Path::new("/")))?;
+    Ok(sock.file_type().is_socket()
+        && dir.mode() & 0o022 == 0
+        && (sock.uid() == 0 || sock.uid() == dir.uid()))
+}
+
+/// Ask ayed and wait for a signed answer from the phone: one line of JSON
+/// each way. The connection stays open while waiting, and closing it (when
+/// this process exits) withdraws the request.
+fn ask(request: &Value) -> io::Result<Answer> {
+    let path = ask_socket();
+    if !trusted(Path::new(&path))? {
+        return Err(io::Error::other(format!("{path} isn't ayed's socket")));
+    }
+    let mut stream = UnixStream::connect(&path)?;
+    stream.set_read_timeout(Some(Duration::from_secs(70)))?;
+    stream.write_all(format!("{request}\n").as_bytes())?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line)?;
+    let v: Value = serde_json::from_str(&line).unwrap_or_default();
+    match v["answer"].as_str() {
+        Some("approved") => Ok(Answer::Approved),
+        Some("denied") => Ok(Answer::Denied),
+        Some("unanswered") => Ok(Answer::Unanswered),
+        // Too long a command, or too many requests waiting already.
+        _ => Err(io::Error::other("ayed refused the request")),
+    }
 }
 
 /// PAM mode, run by `auth sufficient pam_exec.so quiet /usr/local/bin/aye`.
@@ -90,7 +131,14 @@ fn pam(user: String) -> ! {
             Ok(Answer::Approved) => writeln!(t, "Approved on your phone."),
             Ok(Answer::Denied) => writeln!(t, "Denied on your phone."),
             Ok(Answer::Unanswered) => writeln!(t, "No answer from your phone."),
-            Err(e) if e.is_connect() => writeln!(t, "Phone approval isn't running here."),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) =>
+            {
+                writeln!(t, "Phone approval isn't running here.")
+            }
             Err(_) => writeln!(t, "Phone approval failed."),
         };
     }

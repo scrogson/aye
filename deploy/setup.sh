@@ -39,6 +39,6 @@ tailscale serve status
 
 echo
 echo "Done. On the phone, in this order:"
-echo "  1. sudo aye register open, then open https://$HOST/register and add a passkey"
+echo "  1. sudo aye register open, then scan the QR code it prints and add a passkey"
 echo "  2. open https://$HOST/ in Safari, Share > Add to Home Screen"
 echo "  3. open Aye from the Home Screen and turn on notifications"

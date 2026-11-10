@@ -5,7 +5,8 @@
 #
 #   - a hidden _aye user for the daemon (made the first time)
 #   - /usr/local/bin/ayed and a launchd daemon, local.ayed; /usr/local/bin/aye
-#   - state in /var/db/aye, log in /var/log/ayed.log
+#   - state in /var/db/aye, log in /var/log/ayed.log, the socket for `aye`
+#     in /var/db/aye-ask
 #   - https://<this Mac's Tailscale name>/ served from 127.0.0.1:7071
 #
 # Run as yourself (not root) from the repo root, after `cargo build --release`.
@@ -50,6 +51,9 @@ fi
 echo "==> ayed"
 PLIST=/Library/LaunchDaemons/local.ayed.plist
 sudo install -d -m700 -o _aye -g _aye /var/db/aye
+# For ask.sock, where `aye` asks for approvals: anyone may reach it, only
+# _aye can put a socket there.
+sudo install -d -m755 -o _aye -g _aye /var/db/aye-ask
 sudo touch /var/log/ayed.log
 sudo chown _aye:_aye /var/log/ayed.log
 sudo chmod 600 /var/log/ayed.log
@@ -72,7 +76,7 @@ echo "(if this prints a login.tailscale.com link, open it to enable Serve/HTTPS 
 
 echo
 echo "Done. On the phone, in this order:"
-echo "  1. sudo aye register open, then open https://$HOST/register and add a passkey"
+echo "  1. sudo aye register open, then scan the QR code it prints and add a passkey"
 echo "  2. open https://$HOST/ in Safari, Share > Add to Home Screen"
 echo "  3. open the new Aye from the Home Screen and turn on notifications"
 echo "Then deploy/macos/pam.sh for sudo, and deploy/claude-hook.sh for Claude Code."
