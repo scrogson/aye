@@ -1,0 +1,13 @@
+# Advisories `cargo audit` (and CI) pass over, each with why. Both come in
+# through jwt-simple 0.12, which web-push 0.11 (the latest) pins; take them
+# out again once web-push moves to a jwt-simple that has the fixes.
+[advisories]
+ignore = [
+    # rsa: timing side channel in RSA private-key operations (Marvin). No RSA
+    # key is ever made or used here: the only key is the ES256 VAPID key.
+    "RUSTSEC-2023-0071",
+    # crypto-bigint 0.5: operations that aren't constant-time, under the
+    # P-256 code that signs VAPID tokens. The key it could leak only signs
+    # pushes to this machine's own subscribers, who are known only to ayed.
+    "RUSTSEC-2026-0387",
+]
