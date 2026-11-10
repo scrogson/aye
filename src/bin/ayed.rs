@@ -1,7 +1,8 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::{HeaderMap, StatusCode, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -44,6 +45,10 @@ const WRONG_CODES: u32 = 5;
 const ASK_MAX: u64 = 64 * 1024;
 /// Requests one local user can have waiting at once.
 const WAITING_MAX: usize = 8;
+/// Requests one local user can make in a minute; each one buzzes the phone.
+const ASKS_A_MINUTE: usize = 30;
+/// Sign-in challenges kept at once; the oldest goes when another is made.
+const LOGINS_MAX: usize = 256;
 
 /// Where `aye` asks for approvals: a Unix socket in a directory only the
 /// daemon's user can write to (and that isn't there at all on Linux while the
@@ -139,9 +144,55 @@ struct Pending {
     deadline: Instant,
     /// The local user who asked, from the socket (not from the request).
     uid: u32,
-    auth: Option<PasskeyAuthentication>,
+    /// The challenges out for this request: one to approve, one to deny.
+    auth: Option<Challenges>,
     /// The answer, and the id of the passkey that signed it.
     done: Option<oneshot::Sender<(bool, String)>>,
+}
+
+/// A request's two challenges. The page signs the one for the answer it was
+/// given, so a signature for Deny can't be handed in as an Approve.
+struct Challenges {
+    approve: PasskeyAuthentication,
+    deny: PasskeyAuthentication,
+}
+
+/// Text from outside, made safe to show on the phone and print in a
+/// terminal: no control characters (so no escape sequences) and none of the
+/// characters that reorder text. Newlines and tabs stay if `lines` is set.
+fn clean(s: &str, lines: bool) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' | '\t' if lines => c,
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => '\u{FFFD}',
+            c if c.is_control() => '\u{FFFD}',
+            c => c,
+        })
+        .collect()
+}
+
+/// The login name for a local user id, or "uid 1234" if it has none.
+fn user_name(uid: u32) -> String {
+    let mut buf = vec![0u8; 4096];
+    let mut pw = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut found = std::ptr::null_mut();
+    // SAFETY: getpwuid_r fills `pw` with pointers into `buf`, both of which
+    // outlive the read of pw_name below; `found` is null unless it succeeded.
+    let name = unsafe {
+        let rc = libc::getpwuid_r(
+            uid,
+            pw.as_mut_ptr(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            &mut found,
+        );
+        (rc == 0 && !found.is_null()).then(|| {
+            std::ffi::CStr::from_ptr((*found).pw_name)
+                .to_string_lossy()
+                .into_owned()
+        })
+    };
+    name.unwrap_or_else(|| format!("uid {uid}"))
 }
 
 /// One line of the activity log: approvals, denials and timeouts, and every
@@ -170,7 +221,8 @@ impl Entry {
         }
     }
     fn detail(mut self, d: impl Into<String>) -> Self {
-        self.detail = Some(d.into());
+        // May quote a push service's error text.
+        self.detail = Some(clean(&d.into(), false));
         self
     }
     fn request(mut self, p: &Pending) -> Self {
@@ -206,8 +258,11 @@ struct App {
     subs: Mutex<Vec<PushSub>>,
     /// Passkey challenges for signing in (notifications, activity), by id.
     logins: Mutex<HashMap<Uuid, (PasskeyAuthentication, Instant)>>,
-    /// Activity tab sign-ins: random token -> when it ends.
-    sessions: Mutex<HashMap<String, Instant>>,
+    /// Activity tab sign-ins: random token -> when it ends, and the passkey
+    /// that signed in.
+    sessions: Mutex<HashMap<String, (Instant, String)>>,
+    /// When each local user's recent requests came in, for ASKS_A_MINUTE.
+    asked: Mutex<HashMap<u32, VecDeque<Instant>>>,
     activity_file: String,
     activity: Mutex<VecDeque<Entry>>,
     passkeys: Mutex<Vec<Passkey>>,
@@ -490,6 +545,7 @@ async fn serve() {
         subs: Mutex::new(subs),
         logins: Mutex::new(HashMap::new()),
         sessions: Mutex::new(HashMap::new()),
+        asked: Mutex::new(HashMap::new()),
         activity_file,
         activity: Mutex::new(activity),
         passkeys: Mutex::new(passkeys),
@@ -561,6 +617,7 @@ async fn serve() {
                 page("text/html; charset=utf-8", NOT_FOUND),
             )
         })
+        .layer(middleware::from_fn_with_state(app.clone(), right_host))
         .with_state(app);
 
     // Overridable only so a test copy can run beside the installed one.
@@ -570,6 +627,31 @@ async fn serve() {
         r = axum::serve(p, public) => r.unwrap(),
         r = control => r.unwrap(),
         r = asks => r.unwrap(),
+    }
+}
+
+/// Answer only requests addressed to this machine: its Tailscale name (what
+/// `tailscale serve` passes on) or the local address itself. A page on some
+/// other site whose name was pointed at 127.0.0.1 (DNS rebinding) sends that
+/// site's name, and gets nothing.
+async fn right_host(State(s): S, req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let name = host.rsplit_once(':').map_or(host.as_str(), |(name, port)| {
+        if port.bytes().all(|b| b.is_ascii_digit()) {
+            name
+        } else {
+            host.as_str() // an IPv6 address without a port
+        }
+    });
+    if name == s.rp_id.to_ascii_lowercase() || matches!(name, "127.0.0.1" | "localhost" | "[::1]") {
+        next.run(req).await
+    } else {
+        StatusCode::MISDIRECTED_REQUEST.into_response()
     }
 }
 
@@ -784,6 +866,12 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                     save_passkeys(s, &keys).await;
                     let left = keys.len();
                     drop(keys);
+                    // Nothing it signed in to, or was asked to sign, outlives it.
+                    s.sessions.lock().await.retain(|_, (_, by)| *by != gone);
+                    s.logins.lock().await.clear();
+                    for p in s.pending.lock().await.values_mut() {
+                        p.auth = None;
+                    }
                     eprintln!("ayed: removed passkey {gone}");
                     s.record(Entry::new("passkey_removed").detail(short(&gone)))
                         .await;
@@ -977,8 +1065,38 @@ async fn ask_one(s: Arc<App>, stream: UnixStream, uid: u32) {
 /// "unanswered" if none came in time, or "refused" if this user already has
 /// too many requests waiting.
 async fn decide(s: Arc<App>, r: Req, uid: u32) -> &'static str {
-    let kind = r.kind.unwrap_or_else(|| "sudo".into());
-    let what = kind_label(&kind);
+    let kind = if r.kind.as_deref() == Some("claude") {
+        "claude"
+    } else {
+        "sudo"
+    };
+    let what = kind_label(kind);
+    // Root (sudo's PAM helper) says who is asking; anyone else is whoever
+    // the socket says they are, whatever name the request gives.
+    let user = match r.user {
+        Some(user) if uid == 0 => clean(&user, false),
+        _ => user_name(uid),
+    };
+    let command = clean(&r.command, true);
+    {
+        let mut asked = s.asked.lock().await;
+        let now = Instant::now();
+        asked.retain(|_, times| {
+            while times
+                .front()
+                .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+            {
+                times.pop_front();
+            }
+            !times.is_empty()
+        });
+        let times = asked.entry(uid).or_default();
+        if times.len() >= ASKS_A_MINUTE {
+            eprintln!("ayed: {user} asked {ASKS_A_MINUTE} times in a minute; refused another");
+            return "refused";
+        }
+        times.push_back(now);
+    }
 
     let id = Uuid::new_v4();
     let (tx, rx) = oneshot::channel();
@@ -992,9 +1110,9 @@ async fn decide(s: Arc<App>, r: Req, uid: u32) -> &'static str {
         pending.insert(
             id,
             Pending {
-                user: r.user.unwrap_or_default(),
-                kind,
-                command: r.command,
+                user,
+                kind: kind.into(),
+                command,
                 deadline,
                 uid,
                 auth: None,
@@ -1072,13 +1190,16 @@ impl Drop for Withdraw {
 
 async fn challenge(State(s): S, Path(id): Path<Uuid>) -> Result<Json<Value>, StatusCode> {
     let keys = s.passkeys.lock().await.clone();
-    let (rcr, auth) = s
-        .webauthn
-        .start_passkey_authentication(&keys)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let start = || {
+        s.webauthn
+            .start_passkey_authentication(&keys)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    };
+    let (to_approve, approve) = start()?;
+    let (to_deny, deny) = start()?;
     let mut p = s.pending.lock().await;
     let entry = p.get_mut(&id).ok_or(StatusCode::NOT_FOUND)?;
-    entry.auth = Some(auth); // a new challenge replaces any old one
+    entry.auth = Some(Challenges { approve, deny }); // new challenges replace any old ones
     Ok(Json(json!({
         "host": s.host,
         "user": entry.user,
@@ -1086,7 +1207,8 @@ async fn challenge(State(s): S, Path(id): Path<Uuid>) -> Result<Json<Value>, Sta
         "command": entry.command,
         // Seconds left rather than a clock time, so the phone's clock doesn't matter.
         "expires_in": entry.deadline.saturating_duration_since(Instant::now()).as_secs_f64(),
-        "options": rcr,
+        "approve": to_approve,
+        "deny": to_deny,
     })))
 }
 
@@ -1100,7 +1222,10 @@ async fn verify(State(s): S, Path(id): Path<Uuid>, Json(v): Json<Verify>) -> Sta
     let auth = {
         let mut p = s.pending.lock().await;
         match p.get_mut(&id).and_then(|e| e.auth.take()) {
-            Some(a) => a, // take() makes the challenge single-use
+            // take() makes both challenges single-use. The signature has to
+            // be over the one for this answer.
+            Some(c) if v.approve => c.approve,
+            Some(c) => c.deny,
             None => return StatusCode::NOT_FOUND,
         }
     };
@@ -1487,6 +1612,15 @@ async fn login_challenge(State(s): S) -> Result<Json<Value>, StatusCode> {
     let id = Uuid::new_v4();
     let mut logins = s.logins.lock().await;
     logins.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(300));
+    if logins.len() >= LOGINS_MAX {
+        let oldest = logins
+            .iter()
+            .min_by_key(|(_, (_, t))| *t)
+            .map(|(id, _)| *id);
+        if let Some(oldest) = oldest {
+            logins.remove(&oldest);
+        }
+    }
     logins.insert(id, (auth, Instant::now()));
     Ok(Json(json!({ "id": id, "options": rcr })))
 }
@@ -1656,6 +1790,19 @@ mod tests {
     }
 
     #[test]
+    fn cleans_text_from_outside() {
+        assert_eq!(clean("ls\x1b[2J\nrm", true), "ls\u{FFFD}[2J\nrm");
+        assert_eq!(clean("a\nb", false), "a\u{FFFD}b");
+        assert_eq!(clean("x\u{202E}y", true), "x\u{FFFD}y");
+    }
+
+    #[test]
+    fn names_local_users() {
+        assert_eq!(user_name(0), "root");
+        assert_eq!(user_name(4_000_000_000), "uid 4000000000");
+    }
+
+    #[test]
     fn device_names() {
         assert_eq!(
             device_name("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X)"),
@@ -1687,8 +1834,8 @@ async fn activity_login(State(s): S, headers: HeaderMap, Json(l): Json<Login>) -
     let token = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     {
         let mut sessions = s.sessions.lock().await;
-        sessions.retain(|_, until| *until > Instant::now());
-        sessions.insert(token.clone(), Instant::now() + SESSION_FOR);
+        sessions.retain(|_, (until, _)| *until > Instant::now());
+        sessions.insert(token.clone(), (Instant::now() + SESSION_FOR, by.clone()));
     }
     s.record(Entry::new("signed_in").detail(format!(
         "activity, {} passkey {}",
@@ -1727,7 +1874,7 @@ async fn signed_in(s: &App, headers: &HeaderMap) -> bool {
         .lock()
         .await
         .get(&token)
-        .is_some_and(|until| *until > Instant::now())
+        .is_some_and(|(until, _)| *until > Instant::now())
 }
 
 /// Requests waiting now, then the log, newest first.

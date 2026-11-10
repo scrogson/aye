@@ -17,6 +17,7 @@ ct-codecs = "1"
 jwt-simple = { version = "0.12.17", default-features = false, features = ["pure-rust"] }
 clap = { version = "4", features = ["derive"] }
 qrcode = { version = "0.14", default-features = false }
+libc = "0.2.191"
 
 [dev-dependencies]
 ece = "2"
