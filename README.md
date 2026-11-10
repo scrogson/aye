@@ -417,6 +417,11 @@ root the next time you use sudo.
 - The local API on 127.0.0.1:7070 accepts requests from any local user, so
   any of them can send you a push. Approving still needs your passkey.
 
+## License
+
+MIT; see [LICENSE](LICENSE). The icon's lettering is Pacifico, credited
+below.
+
 ## Icon
 
 `assets/icon.svg` is "aye!" set in [Pacifico](https://github.com/googlefonts/Pacifico)
