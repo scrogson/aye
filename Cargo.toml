@@ -8,13 +8,15 @@ license = "MIT"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 webauthn-rs = "0.5"
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sysinfo = "0.37"
 web-push = { version = "0.11", default-features = false }
 ct-codecs = "1"
 jwt-simple = { version = "0.12.17", default-features = false, features = ["pure-rust"] }
+clap = { version = "4", features = ["derive"] }
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 ece = "2"

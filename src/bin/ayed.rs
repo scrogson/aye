@@ -5,17 +5,21 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use clap::{Parser, Subcommand};
 use ct_codecs::{Base64UrlSafeNoPadding, Encoder};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
-    sync::{Arc, LazyLock},
+    sync::{
+        Arc, LazyLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     net::{UnixListener, UnixStream},
     sync::{Mutex, oneshot},
     time::Instant,
@@ -34,28 +38,107 @@ const SESSION_FOR: Duration = Duration::from_secs(15 * 60);
 /// Activity entries kept (in memory and on disk).
 const KEEP: usize = 1000;
 
-const USAGE: &str = "\
-usage:
-  ayed                        run the daemon
-  aye status                  show address, passkeys and registration
-  aye register open [--for 10m]
-                              let devices add a passkey (closes itself)
-  aye register close
-  aye passkeys                list registered passkeys
-  aye passkeys remove <id>    remove one (an id prefix is enough)
-  aye push                    list devices that get notifications
-  aye push test               send a test notification to each
-  aye push remove <n>         stop notifying one (number from the list)
-  aye log [n]                 the last n activity entries (default 20)
+/// Wrong registration codes allowed before registration closes itself.
+const WRONG_CODES: u32 = 5;
+/// The longest request (one JSON line) the ask socket reads.
+const ASK_MAX: u64 = 64 * 1024;
+/// Requests one local user can have waiting at once.
+const WAITING_MAX: usize = 8;
 
-The commands talk to the running daemon over its control socket, which only
-root can open: run them with sudo. `ayed <command>` works the same.";
+/// Where `aye` asks for approvals: a Unix socket in a directory only the
+/// daemon's user can write to (and that isn't there at all on Linux while the
+/// daemon is stopped), so nothing else on the machine can stand in for ayed.
+/// src/bin/aye.rs has the same path.
+const ASK_SOCKET: &str = if cfg!(target_os = "macos") {
+    "/var/db/aye-ask/ask.sock"
+} else {
+    "/run/aye/ask.sock"
+};
+
+/// Approve sudo and Claude Code's permission prompts from your phone.
+///
+/// With no command, runs the daemon. The commands talk to the running daemon
+/// over its control socket, which only root can open: run them with sudo.
+#[derive(Parser)]
+#[command(name = "aye", bin_name = "aye", version)]
+struct Cli {
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Run the daemon
+    #[command(hide = true)]
+    Serve,
+    /// Show the address, passkeys, registration, devices and waiting requests
+    Status,
+    /// Let a device add a passkey
+    Register {
+        #[command(subcommand)]
+        cmd: RegisterCmd,
+    },
+    /// List registered passkeys, or remove one
+    Passkeys {
+        #[command(subcommand)]
+        cmd: Option<PasskeysCmd>,
+    },
+    /// List the devices that get notifications, test them, or remove one
+    Push {
+        #[command(subcommand)]
+        cmd: Option<PushCmd>,
+    },
+    /// Show the last activity entries
+    Log {
+        /// How many entries
+        #[arg(default_value_t = 20)]
+        n: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum RegisterCmd {
+    /// Open registration for one passkey; prints a code and a QR code for the device
+    Open {
+        /// How long it stays open: 90s, 10m, 1h (a bare number is minutes)
+        #[arg(long = "for", value_name = "TIME", default_value = "10m", value_parser = parse_duration)]
+        open_for: Duration,
+    },
+    /// Close registration now
+    Close,
+}
+
+#[derive(Subcommand)]
+enum PasskeysCmd {
+    /// List registered passkeys
+    List,
+    /// Remove one
+    Remove {
+        /// The passkey's id, or 4 or more characters from its start
+        id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum PushCmd {
+    /// List the devices that get notifications
+    List,
+    /// Send each one a test notification
+    Test,
+    /// Stop notifying one
+    Remove {
+        /// The device's number from the list
+        n: u64,
+    },
+}
 
 struct Pending {
     user: String,
     kind: String,
     command: String,
     deadline: Instant,
+    /// The local user who asked, from the socket (not from the request).
+    uid: u32,
     auth: Option<PasskeyAuthentication>,
     /// The answer, and the id of the passkey that signed it.
     done: Option<oneshot::Sender<(bool, String)>>,
@@ -130,16 +213,28 @@ struct App {
     passkeys: Mutex<Vec<Passkey>>,
     reg: Mutex<Option<PasskeyRegistration>>,
     pending: Mutex<HashMap<Uuid, Pending>>,
-    /// Registration is open until this moment; None means closed.
-    register_until: Mutex<Option<Instant>>,
+    /// Entries appended to activity.jsonl since it was last trimmed.
+    appended: AtomicUsize,
+    /// None while registration is closed.
+    register: Mutex<Option<RegWindow>>,
+}
+
+/// Registration, opened by `aye register open` for one passkey.
+struct RegWindow {
+    until: Instant,
+    /// Six digits, shown in the terminal that opened it; a device has to send
+    /// them to register, so reaching the page isn't enough.
+    code: String,
+    wrong: u32,
 }
 
 impl App {
     async fn registration_open(&self) -> bool {
-        self.register_until
+        self.register
             .lock()
             .await
-            .is_some_and(|t| t > Instant::now())
+            .as_ref()
+            .is_some_and(|w| w.until > Instant::now())
     }
 
     /// Add to the activity log, in memory and appended to activity.jsonl.
@@ -158,6 +253,24 @@ impl App {
         while log.len() > KEEP {
             log.pop_front();
         }
+        // Keep the file from growing without end between restarts.
+        if self.appended.fetch_add(1, Ordering::Relaxed) + 1 >= KEEP {
+            self.appended.store(0, Ordering::Relaxed);
+            write_activity(&self.activity_file, &log);
+        }
+    }
+}
+
+/// Replace the activity file with these entries.
+fn write_activity(path: &str, log: &VecDeque<Entry>) {
+    let body: String = log
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap() + "\n")
+        .collect();
+    let tmp = format!("{path}.tmp");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::rename(&tmp, path);
     }
 }
 
@@ -170,15 +283,7 @@ fn load_activity(path: &str) -> VecDeque<Entry> {
         .collect();
     if log.len() > KEEP {
         log.drain(..log.len() - KEEP);
-        let body: String = log
-            .iter()
-            .map(|e| serde_json::to_string(e).unwrap() + "\n")
-            .collect();
-        let tmp = format!("{path}.tmp");
-        if std::fs::write(&tmp, body).is_ok() {
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-            let _ = std::fs::rename(&tmp, path);
-        }
+        write_activity(path, &log);
     }
     log
 }
@@ -228,58 +333,60 @@ const SERVICE_STATUS: &str = if cfg!(target_os = "macos") {
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let cmd = match args.as_slice() {
-        [] | ["serve"] => return serve().await,
-        ["status"] => json!({ "cmd": "status" }),
-        ["register", "open"] => {
-            json!({ "cmd": "register_open", "seconds": REGISTER_FOR.as_secs() })
-        }
-        ["register", "open", "--for", d] => match parse_duration(d) {
-            Some(d) => json!({ "cmd": "register_open", "seconds": d.as_secs() }),
-            None => exit_usage(&format!(
-                "can't read {d:?} as a duration; try 10m, 90s or 1h"
-            )),
-        },
-        ["register", "close"] => json!({ "cmd": "register_close" }),
-        ["passkeys"] | ["passkeys", "list"] => json!({ "cmd": "passkeys" }),
-        ["passkeys", "remove", id] => json!({ "cmd": "passkeys_remove", "id": id }),
-        ["push"] | ["push", "list"] => json!({ "cmd": "push" }),
-        ["push", "test"] => json!({ "cmd": "push_test" }),
-        ["log"] => json!({ "cmd": "log", "n": 20 }),
-        ["log", n] => match n.parse::<u64>() {
-            Ok(n) => json!({ "cmd": "log", "n": n }),
-            Err(_) => exit_usage("give a number of entries, e.g. aye log 50"),
-        },
-        ["push", "remove", n] => match n.parse::<u64>() {
-            Ok(n) => json!({ "cmd": "push_remove", "n": n }),
-            Err(_) => exit_usage("give the device's number from: aye push"),
-        },
-        ["-h" | "--help" | "help"] => {
-            println!("{USAGE}");
-            return;
-        }
-        _ => exit_usage("unknown command"),
+    let cmd = match Cli::parse().cmd {
+        None | Some(Cmd::Serve) => return serve().await,
+        Some(Cmd::Status) => json!({ "cmd": "status" }),
+        Some(Cmd::Register {
+            cmd: RegisterCmd::Open { open_for },
+        }) => json!({ "cmd": "register_open", "seconds": open_for.as_secs() }),
+        Some(Cmd::Register {
+            cmd: RegisterCmd::Close,
+        }) => json!({ "cmd": "register_close" }),
+        Some(Cmd::Passkeys {
+            cmd: None | Some(PasskeysCmd::List),
+        }) => json!({ "cmd": "passkeys" }),
+        Some(Cmd::Passkeys {
+            cmd: Some(PasskeysCmd::Remove { id }),
+        }) => json!({ "cmd": "passkeys_remove", "id": id }),
+        Some(Cmd::Push {
+            cmd: None | Some(PushCmd::List),
+        }) => json!({ "cmd": "push" }),
+        Some(Cmd::Push {
+            cmd: Some(PushCmd::Test),
+        }) => json!({ "cmd": "push_test" }),
+        Some(Cmd::Push {
+            cmd: Some(PushCmd::Remove { n }),
+        }) => json!({ "cmd": "push_remove", "n": n }),
+        Some(Cmd::Log { n }) => json!({ "cmd": "log", "n": n }),
     };
     std::process::exit(control_client(cmd).await);
 }
 
-fn exit_usage(why: &str) -> ! {
-    eprintln!("ayed: {why}\n\n{USAGE}");
-    std::process::exit(2);
+fn parse_duration(s: &str) -> Result<Duration, String> {
+    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let secs = match (n.parse::<u64>(), unit) {
+        (Ok(n), "s") => Some(n),
+        (Ok(n), "" | "m") => n.checked_mul(60),
+        (Ok(n), "h") => n.checked_mul(3600),
+        _ => None,
+    };
+    match secs {
+        Some(secs) if secs > 0 && secs <= 24 * 3600 => Ok(Duration::from_secs(secs)),
+        Some(_) => Err("between 1s and 24h".into()),
+        None => Err("try 10m, 90s or 1h".into()),
+    }
 }
 
-fn parse_duration(s: &str) -> Option<Duration> {
-    let (n, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
-    let n: u64 = n.parse().ok()?;
-    let secs = match unit {
-        "s" => n,
-        "" | "m" => n * 60,
-        "h" => n * 3600,
-        _ => return None,
-    };
-    (secs > 0 && secs <= 24 * 3600).then(|| Duration::from_secs(secs))
+/// A QR code for the terminal, two rows of modules to a line of text.
+fn qr(text: &str) -> Option<String> {
+    use qrcode::render::unicode::Dense1x2;
+    let code = qrcode::QrCode::new(text).ok()?;
+    Some(
+        code.render::<Dense1x2>()
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark)
+            .build(),
+    )
 }
 
 /// Send one command to the running daemon and print its answer.
@@ -331,6 +438,10 @@ async fn control_client(cmd: Value) -> i32 {
     let text = reply["text"].as_str().unwrap_or_default();
     if reply["ok"].as_bool() == Some(true) {
         println!("{text}");
+        // `register open` sends the page's address to show as a QR code.
+        if let Some(code) = reply["qr"].as_str().and_then(qr) {
+            println!("\n{code}");
+        }
         0
     } else {
         eprintln!("ayed: {text}");
@@ -384,14 +495,15 @@ async fn serve() {
         passkeys: Mutex::new(passkeys),
         reg: Mutex::new(None),
         pending: Mutex::new(HashMap::new()),
-        register_until: Mutex::new(None),
+        appended: AtomicUsize::new(0),
+        register: Mutex::new(None),
     });
     let control = tokio::spawn(control_server(app.clone(), socket_path()));
+    let asks = tokio::spawn(ask_server(
+        app.clone(),
+        std::env::var("AYE_ASK_SOCKET").unwrap_or_else(|_| ASK_SOCKET.into()),
+    ));
 
-    let local = Router::new()
-        .route("/local/request", post(request))
-        .route("/local/ask", post(ask))
-        .with_state(app.clone());
     let public = Router::new()
         .route(
             "/",
@@ -452,14 +564,12 @@ async fn serve() {
         .with_state(app);
 
     // Overridable only so a test copy can run beside the installed one.
-    let local_addr = std::env::var("LOCAL_ADDR").unwrap_or_else(|_| "127.0.0.1:7070".into());
     let pages_addr = std::env::var("PAGES_ADDR").unwrap_or_else(|_| "127.0.0.1:7071".into());
-    let l = tokio::net::TcpListener::bind(&local_addr).await.unwrap();
     let p = tokio::net::TcpListener::bind(&pages_addr).await.unwrap();
     tokio::select! {
-        r = axum::serve(l, local) => r.unwrap(),
         r = axum::serve(p, public) => r.unwrap(),
         r = control => r.unwrap(),
+        r = asks => r.unwrap(),
     }
 }
 
@@ -511,6 +621,11 @@ fn short(id: &str) -> String {
     id.chars().take(8).collect()
 }
 
+/// Six random digits for `aye register open`.
+fn new_code() -> String {
+    format!("{:06}", Uuid::new_v4().as_u128() % 1_000_000)
+}
+
 fn mins_secs(d: Duration) -> String {
     format!("{}:{:02}", d.as_secs() / 60, d.as_secs() % 60)
 }
@@ -521,10 +636,11 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
     match cmd["cmd"].as_str().unwrap_or_default() {
         "status" => {
             let keys = s.passkeys.lock().await.len();
-            let reg = match *s.register_until.lock().await {
-                Some(t) if t > Instant::now() => {
-                    format!("open, closes in {}", mins_secs(t - Instant::now()))
-                }
+            let reg = match s.register.lock().await.as_ref() {
+                Some(w) if w.until > Instant::now() => format!(
+                    "open, closes in {}",
+                    mins_secs(w.until.saturating_duration_since(Instant::now()))
+                ),
                 _ => "closed".into(),
             };
             let waiting = s.pending.lock().await.len();
@@ -603,21 +719,34 @@ async fn control_command(s: &App, cmd: &Value) -> Value {
                 .as_u64()
                 .unwrap_or(REGISTER_FOR.as_secs())
                 .clamp(1, 24 * 3600);
-            *s.register_until.lock().await = Some(Instant::now() + Duration::from_secs(secs));
+            let code = new_code();
+            *s.register.lock().await = Some(RegWindow {
+                until: Instant::now() + Duration::from_secs(secs),
+                code: code.clone(),
+                wrong: 0,
+            });
+            *s.reg.lock().await = None;
             eprintln!("ayed: registration open for {secs}s");
             s.record(
                 Entry::new("registration_opened")
                     .detail(format!("for {}", mins_secs(Duration::from_secs(secs)))),
             )
             .await;
-            ok(format!(
-                "Registration is open for {}. On the device, open {}/register\nIt closes by itself; to close it now: sudo aye register close",
-                mins_secs(Duration::from_secs(secs)),
-                s.origin
-            ))
+            json!({
+                "ok": true,
+                "text": format!(
+                    "Registration is open for {}, for one passkey.\nOn the device, scan the code below, or open {}/register and enter {} {}.\nIt closes once a passkey is added; to close it now: sudo aye register close",
+                    mins_secs(Duration::from_secs(secs)),
+                    s.origin,
+                    &code[..3],
+                    &code[3..],
+                ),
+                // The code rides in the fragment, which browsers don't send anywhere.
+                "qr": format!("{}/register#{code}", s.origin),
+            })
         }
         "register_close" => {
-            *s.register_until.lock().await = None;
+            *s.register.lock().await = None;
             *s.reg.lock().await = None;
             eprintln!("ayed: registration closed");
             s.record(Entry::new("registration_closed")).await;
@@ -791,66 +920,89 @@ async fn save_passkeys(s: &App, keys: &[Passkey]) {
     }
 }
 
-// ---------- local API: blocks until approved, denied, or timed out ----------
+// ---------- ask socket: one JSON line in, one JSON line out, once answered ----------
 
-/// What a caller asks to approve. Newer callers send `user`, `kind` and
-/// `command`; older ones (pam_aye) send one `summary` like
-/// "alice@laptop: sudo brew upgrade", which is split as a fallback.
+/// What a caller asks to approve.
 #[derive(Deserialize)]
 struct Req {
     user: Option<String>,
     kind: Option<String>,
-    command: Option<String>,
-    summary: Option<String>,
+    command: String,
 }
 
-/// The original endpoint: true only for a signed approval.
-async fn request(State(s): S, Json(r): Json<Req>) -> Json<bool> {
-    Json(decide(s, r).await == Some(true))
+/// Any local user may ask (the Claude Code hook runs as you), so the socket
+/// is open to all; what protects it is where it lives. See ASK_SOCKET.
+async fn ask_server(s: Arc<App>, path: String) {
+    let _ = std::fs::remove_file(&path); // left over from a crash
+    let listener = UnixListener::bind(&path).unwrap_or_else(|e| panic!("bind {path}: {e}"));
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    loop {
+        let Ok((stream, _)) = listener.accept().await else {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            continue;
+        };
+        let uid = stream.peer_cred().map(|c| c.uid()).unwrap_or(u32::MAX);
+        tokio::spawn(ask_one(s.clone(), stream, uid));
+    }
 }
 
-/// Tells "denied" apart from "nobody answered", for callers that fall back
-/// to something else (the Claude Code hook shows its own dialog then).
-async fn ask(State(s): S, Json(r): Json<Req>) -> Json<Value> {
-    let answer = match decide(s, r).await {
-        Some(true) => "approved",
-        Some(false) => "denied",
-        None => "unanswered",
+async fn ask_one(s: Arc<App>, stream: UnixStream, uid: u32) {
+    let (r, mut w) = stream.into_split();
+    let mut r = BufReader::new(r.take(ASK_MAX));
+    let mut line = String::new();
+    let read = tokio::time::timeout(Duration::from_secs(5), r.read_line(&mut line)).await;
+    let req = match read {
+        Ok(Ok(_)) if line.ends_with('\n') => serde_json::from_str::<Req>(&line).ok(),
+        _ => None, // too slow, too long, or cut off
     };
-    Json(json!({ "answer": answer }))
-}
-
-/// Push to the phone and wait for a signed answer; None if none came in time.
-async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
-    let (user, command) = match (r.user, r.command, r.summary) {
-        (user, Some(command), _) => (user.unwrap_or_default(), command),
-        (_, None, Some(summary)) => match summary.split_once(": ") {
-            Some((who, cmd)) => (
-                who.split('@').next().unwrap_or(who).to_string(),
-                cmd.to_string(),
-            ),
-            None => (String::new(), summary),
+    let mut r = r.into_inner().into_inner();
+    let answer = match req {
+        None => "refused",
+        Some(req) => tokio::select! {
+            a = decide(s, req, uid) => a,
+            // The asker went away (Enter at the sudo prompt, Ctrl-C). Dropping
+            // `decide` here withdraws the request; see Withdraw.
+            _ = async {
+                let mut buf = [0u8; 64];
+                while matches!(r.read(&mut buf).await, Ok(n) if n > 0) {}
+            } => return,
         },
-        _ => return None,
     };
+    let _ = w
+        .write_all(format!("{}\n", json!({ "answer": answer })).as_bytes())
+        .await;
+}
+
+/// Push to the phone and wait for a signed answer: "approved", "denied",
+/// "unanswered" if none came in time, or "refused" if this user already has
+/// too many requests waiting.
+async fn decide(s: Arc<App>, r: Req, uid: u32) -> &'static str {
     let kind = r.kind.unwrap_or_else(|| "sudo".into());
     let what = kind_label(&kind);
 
     let id = Uuid::new_v4();
     let (tx, rx) = oneshot::channel();
     let deadline = Instant::now() + TIMEOUT;
-    s.pending.lock().await.insert(
-        id,
-        Pending {
-            user,
-            kind,
-            command,
-            deadline,
-            auth: None,
-            done: Some(tx),
-        },
-    );
-    // If the asker gives up (Enter at the sudo prompt, Ctrl-C), axum drops
+    {
+        let mut pending = s.pending.lock().await;
+        if pending.values().filter(|p| p.uid == uid).count() >= WAITING_MAX {
+            eprintln!("ayed: uid {uid} has {WAITING_MAX} requests waiting; refused another");
+            return "refused";
+        }
+        pending.insert(
+            id,
+            Pending {
+                user: r.user.unwrap_or_default(),
+                kind,
+                command: r.command,
+                deadline,
+                uid,
+                auth: None,
+                done: Some(tx),
+            },
+        );
+    }
+    // If the asker gives up (Enter at the sudo prompt, Ctrl-C), ask_one drops
     // this future; the guard then withdraws the request so the phone page
     // shows it as expired instead of offering to approve nothing.
     let mut guard = Withdraw {
@@ -879,7 +1031,11 @@ async fn decide(s: Arc<App>, r: Req) -> Option<bool> {
     if let Some(p) = p {
         s.record(Entry::new(event).request(&p).detail(detail)).await;
     }
-    answer.map(|(yes, _)| yes)
+    match answer {
+        Some((true, _)) => "approved",
+        Some((false, _)) => "denied",
+        None => "unanswered",
+    }
 }
 
 struct Withdraw {
@@ -1001,9 +1157,38 @@ async fn reg_status(State(s): S) -> Json<Value> {
     }))
 }
 
-async fn reg_start(State(s): S) -> Result<Json<CreationChallengeResponse>, StatusCode> {
-    if !s.registration_open().await {
-        return Err(StatusCode::FORBIDDEN);
+#[derive(Deserialize)]
+struct RegStart {
+    code: String,
+}
+
+/// Needs the code `aye register open` printed: 403 while closed, 401 for a
+/// wrong code, and WRONG_CODES of those close registration.
+async fn reg_start(
+    State(s): S,
+    Json(r): Json<RegStart>,
+) -> Result<Json<CreationChallengeResponse>, StatusCode> {
+    {
+        let mut reg = s.register.lock().await;
+        let Some(w) = reg.as_mut().filter(|w| w.until > Instant::now()) else {
+            return Err(StatusCode::FORBIDDEN);
+        };
+        let given: String = r.code.chars().filter(char::is_ascii_digit).collect();
+        if given != w.code {
+            w.wrong += 1;
+            if w.wrong >= WRONG_CODES {
+                *reg = None;
+                drop(reg);
+                *s.reg.lock().await = None;
+                eprintln!("ayed: registration closed after {WRONG_CODES} wrong codes");
+                s.record(
+                    Entry::new("registration_closed")
+                        .detail(format!("after {WRONG_CODES} wrong codes")),
+                )
+                .await;
+            }
+            return Err(StatusCode::UNAUTHORIZED);
+        }
     }
     let exclude: Vec<_> = s
         .passkeys
@@ -1040,6 +1225,8 @@ async fn reg_finish(
         return StatusCode::UNAUTHORIZED;
     };
     let id = cred_id(&pk);
+    // One passkey per `aye register open`.
+    *s.register.lock().await = None;
     let mut keys = s.passkeys.lock().await;
     keys.push(pk);
     save_passkeys(&s, &keys).await;

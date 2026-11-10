@@ -87,6 +87,13 @@ dl.meta .mono { font-family: var(--font-mono); font-size: 13px; }
 .note { font-size: 13px; color: var(--muted); margin: auto 0 0; display: flex; gap: 8px; align-items: flex-start; }
 .note svg { flex: none; width: 15px; height: 15px; margin-top: 2px; }
 .error { margin: 0; font-size: 14px; color: var(--bad); }
+.codefield { display: grid; gap: 6px; font-size: 14px; color: var(--muted); }
+.code {
+  font: 600 24px var(--font-mono); letter-spacing: .18em; text-align: center;
+  padding: 12px; border: 1px solid var(--line); border-radius: 14px;
+  background: var(--code); color: var(--ink); width: 100%; box-sizing: border-box;
+}
+.code:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
 
 .actions {
   position: sticky; bottom: 0;

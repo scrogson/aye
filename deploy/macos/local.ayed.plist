@@ -4,7 +4,8 @@
   ayed as a launchd daemon. deploy/macos/setup.sh fills in @HOST@ (this
   Mac's Tailscale name) and installs it to /Library/LaunchDaemons. It runs as
   the hidden _aye user; passkeys.json, push.json, vapid.key, the activity
-  log and control.sock live in /var/db/aye, readable only by that user.
+  log and control.sock live in /var/db/aye, readable only by that user;
+  ask.sock, where `aye` asks for approvals, is in /var/db/aye-ask.
 -->
 <plist version="1.0">
 <dict>
